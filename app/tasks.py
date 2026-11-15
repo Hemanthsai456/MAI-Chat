@@ -139,19 +139,12 @@ class TaskManager:
             self._workers.append(t)
 
     def submit(self, prompt: str, intent: Intent) -> Task:
-        """Submit a task to the execution queue."""
+        """Submit a task to the execution queue atomically."""
         task = Task(id=uuid.uuid4().hex, prompt=prompt, intent=intent)
         self._set_stage(task, "request_received", "completed", "Request accepted and assigned ID")
         self._set_stage(task, "intent_interpreted", "completed", intent.describe())
         self._set_stage(task, "plan_prepared", "completed", f"Tool site-crawler with limit {intent.max_pages} pages")
 
-        with self._lock:
-            if self._queue.qsize() >= self.queue_capacity:
-                raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
-            self._tasks[task.id] = task
-            self._evict_locked()
-
-        # Save initial record to database
         record = TaskRecord(
             id=task.id,
             prompt=task.prompt,
@@ -168,10 +161,21 @@ class TaskManager:
             }),
             plan_json=json.dumps(intent.plan.to_dict() if intent.plan else {}),
             progress_json=json.dumps(task.progress),
+            stages_json=json.dumps([s.to_dict() for s in task.stages.values()]),
         )
-        self.db.save_task(record)
 
-        self._queue.put(task)
+        with self._lock:
+            if self._shutdown:
+                raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
+
+            self._tasks[task.id] = task
+            self._evict_locked()
+            self.db.save_task(record)
+
         return task
 
     def get(self, task_id: str) -> Task | None:
@@ -208,12 +212,39 @@ class TaskManager:
             notes=tuple(record.intent.get("notes", [])),
             plan=plan,
         )
+
+        stages_map: dict[str, StageEvent] = {}
+        if record.stages:
+            for s_dict in record.stages:
+                s_id = s_dict.get("stage", "")
+                if s_id:
+                    stages_map[s_id] = StageEvent(
+                        stage=s_id,
+                        label=s_dict.get("label", ""),
+                        status=s_dict.get("status", "pending"),
+                        timestamp=s_dict.get("timestamp"),
+                        detail=s_dict.get("detail", ""),
+                    )
+        elif record.status in TERMINAL_STATES:
+            # Fallback for historical tasks without saved stages: never show pending
+            is_success = record.status in ("succeeded", "partial")
+            for s_id, s_label in STAGES:
+                st = "completed" if is_success else ("failed" if s_id == "task_completed" else "completed")
+                stages_map[s_id] = StageEvent(
+                    stage=s_id,
+                    label=s_label,
+                    status=st,
+                    timestamp=record.completed_at or record.created_at,
+                    detail=f"Task {record.status}",
+                )
+
         task = Task(
             id=record.id,
             prompt=record.prompt,
             intent=intent,
             status=record.status,
             progress=record.progress,
+            stages=stages_map,
             result=record.result,
             created_at=record.created_at,
             started_at=record.started_at,
@@ -316,6 +347,69 @@ class TaskManager:
         json_data = task.result.get("json") if task.result else "{}"
         return json_data or "{}", "application/json; charset=utf-8", f"task_{task_id_short}.json"
 
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Coordinated graceful shutdown of the execution engine.
+
+        Stops accepting new submissions, marks queued tasks as cancelled,
+        signals active subprocesses to terminate, joins worker threads,
+        and cleanly closes database resources.
+        """
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+
+            # Drain unstarted queued tasks and honestly cancel them
+            drained_tasks: list[Task] = []
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                    if item is not None:
+                        drained_tasks.append(item)
+                except queue.Empty:
+                    break
+
+            for t in drained_tasks:
+                if t.status in TERMINAL_STATES:
+                    continue
+                t.status = "cancelled"
+                t.completed_at = time.time()
+                t.progress.append("Task was cancelled during graceful server shutdown.")
+                self._set_stage(t, "task_completed", "failed", "Cancelled due to server shutdown")
+                stages_list = [s.to_dict() for s in t.stages.values()]
+                cancel_result = build_message(CANCELLED, "warning", "Cancelled during server shutdown.")
+                self.db.complete_task(
+                    t.id,
+                    "cancelled",
+                    cancel_result,
+                    exit_code=-1,
+                    stages_dict=stages_list,
+                )
+
+            # Signal cancellation to active running tasks to terminate subprocess trees
+            for task in self._tasks.values():
+                if task.status not in TERMINAL_STATES:
+                    task.cancel_event.set()
+
+        # Send sentinels to wake up waiting workers
+        for _ in self._workers:
+            try:
+                self._queue.put_nowait(None)
+            except (queue.Full, Exception):
+                pass
+
+        # Join worker threads
+        start_wait = time.monotonic()
+        for worker in self._workers:
+            remaining = max(0.1, timeout - (time.monotonic() - start_wait))
+            worker.join(timeout=remaining)
+
+        # Close database connection cleanly
+        try:
+            self.db.close()
+        except Exception:
+            log.exception("Error closing database during shutdown")
+
     # ----- Internals -------------------------------------------------------
 
     def _set_stage(self, task: Task, stage_name: str, status: str, detail: str = "") -> None:
@@ -332,7 +426,9 @@ class TaskManager:
                 task.status = status
             if note:
                 task.progress.append(note)
+            stages_list = [s.to_dict() for s in task.stages.values()]
         self.db.update_task_progress(task.id, status, note)
+        self.db.update_task_stages(task.id, stages_list)
 
     def _finish(self, task: Task, result: dict[str, Any], exit_code: int | None = None, duration_s: float | None = None) -> None:
         with self._lock:
@@ -343,6 +439,7 @@ class TaskManager:
             task.progress.append(f"Finished: {banner_text}")
             stage_status = "completed" if task.status in ("succeeded", "partial") else "failed"
             self._set_stage(task, "task_completed", stage_status, banner_text)
+            stages_list = [s.to_dict() for s in task.stages.values()]
 
         self.db.complete_task(
             task.id,
@@ -351,6 +448,7 @@ class TaskManager:
             duration_s=duration_s,
             exit_code=exit_code,
             error_details=result.get("errors", []),
+            stages_dict=stages_list,
         )
 
     def _worker_loop(self) -> None:

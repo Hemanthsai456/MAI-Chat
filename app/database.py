@@ -1,6 +1,6 @@
-"""SQLite persistence layer for MAI-Chat task lifecycle, plans, and execution history.
+"""SQLite persistence layer with versioned migrations for MAI-Chat task lifecycle.
 
-Guarantees durable task tracking across server restarts.
+Guarantees durable task tracking and stage restoration across server restarts.
 Interrupted executions are honestly marked as interrupted/failed, never successful.
 """
 from __future__ import annotations
@@ -38,6 +38,7 @@ class TaskRecord:
     result_json: str | None = None
     error_json: str | None = None
     progress_json: str = "[]"
+    stages_json: str = "[]"
 
     @property
     def intent(self) -> dict[str, Any]:
@@ -69,9 +70,62 @@ class TaskRecord:
         except Exception:
             return []
 
+    @property
+    def stages(self) -> list[dict[str, Any]]:
+        try:
+            return json.loads(self.stages_json)
+        except Exception:
+            return []
+
+
+# ---------------------------------------------------------------------------
+# Versioned Database Migrations
+# ---------------------------------------------------------------------------
+
+def _migration_v1(conn: sqlite3.Connection) -> None:
+    """Version 1: Create base tasks table and indexes."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            prompt TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            target_url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            started_at REAL,
+            completed_at REAL,
+            duration_s REAL,
+            exit_code INTEGER,
+            intent_json TEXT NOT NULL DEFAULT '{}',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error_json TEXT,
+            progress_json TEXT NOT NULL DEFAULT '[]'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+
+
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    """Version 2: Add stages_json column to tasks table for timeline persistence."""
+    cursor = conn.execute("PRAGMA table_info(tasks)")
+    columns = [row["name"] for row in cursor.fetchall()]
+    if "stages_json" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN stages_json TEXT NOT NULL DEFAULT '[]'")
+
+
+MIGRATIONS = [
+    (1, "Create base tasks table and indexes", _migration_v1),
+    (2, "Add stages_json column for historical stage timeline persistence", _migration_v2),
+]
+
 
 class Database:
-    """Manages SQLite connections, schema initialization, and transactional queries."""
+    """Manages SQLite connections, schema initialization, versioned migrations, and transactional queries."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         if db_path is None:
@@ -90,6 +144,7 @@ class Database:
         self._init_db()
 
     def close(self) -> None:
+        """Safely close database connections and release file locks."""
         if self._mem_conn:
             try:
                 self._mem_conn.close()
@@ -99,7 +154,7 @@ class Database:
 
     @contextlib.contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """Context manager for connections."""
+        """Context manager that ensures connections and file handles are safely managed."""
         if self._mem_conn is not None:
             yield self._mem_conn
             return
@@ -119,44 +174,34 @@ class Database:
             conn.close()
 
     def _init_db(self) -> None:
-        """Create tables and indexes if they do not exist."""
+        """Execute versioned database migrations in order."""
         with self._connection() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_versions (
                     version INTEGER PRIMARY KEY,
-                    applied_at REAL NOT NULL
+                    applied_at REAL NOT NULL,
+                    description TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    prompt TEXT NOT NULL,
-                    task_type TEXT NOT NULL,
-                    target_url TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    tool TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    started_at REAL,
-                    completed_at REAL,
-                    duration_s REAL,
-                    exit_code INTEGER,
-                    intent_json TEXT NOT NULL DEFAULT '{}',
-                    plan_json TEXT NOT NULL DEFAULT '{}',
-                    result_json TEXT,
-                    error_json TEXT,
-                    progress_json TEXT NOT NULL DEFAULT '[]'
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
-            )
+            # Ensure description column exists if table was created in an earlier session
+            cursor = conn.execute("PRAGMA table_info(schema_versions)")
+            cols = [row["name"] for row in cursor.fetchall()]
+            if "description" not in cols:
+                conn.execute("ALTER TABLE schema_versions ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+
+            cursor = conn.execute("SELECT version FROM schema_versions ORDER BY version ASC")
+            applied = {row["version"] for row in cursor.fetchall()}
+
+            for ver, desc, migration_func in MIGRATIONS:
+                if ver not in applied:
+                    log.info("Applying database migration v%d: %s", ver, desc)
+                    migration_func(conn)
+                    conn.execute(
+                        "INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)",
+                        (ver, time.time(), desc),
+                    )
 
     def recover_interrupted_tasks(self) -> int:
         """On startup, any tasks left in 'running' or 'queued' state are honestly marked interrupted."""
@@ -164,7 +209,7 @@ class Database:
             now = time.time()
             cursor = conn.execute(
                 """
-                SELECT id, progress_json FROM tasks WHERE status IN ('queued', 'running')
+                SELECT id, progress_json, stages_json FROM tasks WHERE status IN ('queued', 'running')
                 """
             )
             interrupted = cursor.fetchall()
@@ -175,6 +220,17 @@ class Database:
                 except Exception:
                     prog = []
                 prog.append("Server restarted while task was in progress; marked as interrupted.")
+
+                # Mark any active stage as failed
+                try:
+                    stages = json.loads(row["stages_json"])
+                    for s in stages:
+                        if s.get("status") == "active":
+                            s["status"] = "failed"
+                            s["detail"] = "Interrupted by server restart"
+                except Exception:
+                    stages = []
+
                 error_doc = {
                     "task_status": "failed",
                     "banner": {
@@ -193,10 +249,18 @@ class Database:
                         completed_at = ?,
                         result_json = ?,
                         error_json = ?,
-                        progress_json = ?
+                        progress_json = ?,
+                        stages_json = ?
                     WHERE id = ?
                     """,
-                    (now, json.dumps(error_doc), json.dumps(error_doc["errors"]), json.dumps(prog), task_id),
+                    (
+                        now,
+                        json.dumps(error_doc),
+                        json.dumps(error_doc["errors"]),
+                        json.dumps(prog),
+                        json.dumps(stages),
+                        task_id,
+                    ),
                 )
             if interrupted:
                 log.info("Recovered %d interrupted tasks upon database startup.", len(interrupted))
@@ -209,8 +273,8 @@ class Database:
                 INSERT OR REPLACE INTO tasks (
                     id, prompt, task_type, target_url, status, tool,
                     created_at, started_at, completed_at, duration_s, exit_code,
-                    intent_json, plan_json, result_json, error_json, progress_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    intent_json, plan_json, result_json, error_json, progress_json, stages_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -229,6 +293,7 @@ class Database:
                     record.result_json,
                     record.error_json,
                     record.progress_json,
+                    record.stages_json,
                 ),
             )
 
@@ -257,6 +322,13 @@ class Database:
                 (new_status, started_at, json.dumps(prog), task_id),
             )
 
+    def update_task_stages(self, task_id: str, stages_dict: list[dict[str, Any]]) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tasks SET stages_json = ? WHERE id = ?",
+                (json.dumps(stages_dict), task_id),
+            )
+
     def complete_task(
         self,
         task_id: str,
@@ -265,6 +337,7 @@ class Database:
         duration_s: float | None = None,
         exit_code: int | None = None,
         error_details: list[dict] | None = None,
+        stages_dict: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._connection() as conn:
             row = conn.execute("SELECT progress_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -277,29 +350,57 @@ class Database:
             banner_text = result.get("banner", {}).get("text", status)
             prog.append(f"Finished: {banner_text}")
             now = time.time()
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?,
-                    completed_at = ?,
-                    duration_s = ?,
-                    exit_code = ?,
-                    result_json = ?,
-                    error_json = ?,
-                    progress_json = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    now,
-                    duration_s,
-                    exit_code,
-                    json.dumps(result),
-                    json.dumps(error_details or []),
-                    json.dumps(prog),
-                    task_id,
-                ),
-            )
+
+            if stages_dict is not None:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        completed_at = ?,
+                        duration_s = ?,
+                        exit_code = ?,
+                        result_json = ?,
+                        error_json = ?,
+                        progress_json = ?,
+                        stages_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status,
+                        now,
+                        duration_s,
+                        exit_code,
+                        json.dumps(result),
+                        json.dumps(error_details or []),
+                        json.dumps(prog),
+                        json.dumps(stages_dict),
+                        task_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        completed_at = ?,
+                        duration_s = ?,
+                        exit_code = ?,
+                        result_json = ?,
+                        error_json = ?,
+                        progress_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status,
+                        now,
+                        duration_s,
+                        exit_code,
+                        json.dumps(result),
+                        json.dumps(error_details or []),
+                        json.dumps(prog),
+                        task_id,
+                    ),
+                )
 
     def get_task(self, task_id: str) -> TaskRecord | None:
         with self._connection() as conn:
@@ -323,6 +424,7 @@ class Database:
                 result_json=row["result_json"],
                 error_json=row["error_json"],
                 progress_json=row["progress_json"],
+                stages_json=row["stages_json"] if "stages_json" in row.keys() else "[]",
             )
 
     def list_tasks(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:

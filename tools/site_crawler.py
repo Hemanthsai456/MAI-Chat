@@ -7,14 +7,21 @@ Usage:
 
 Writes ONE valid JSON document to stdout. Progress and debug logs go to stderr.
 
-Security and Reliability Controls:
-- Standard library only (no untrusted dependencies).
-- Strict same-host boundary (drops off-site redirects and links).
-- Defense-in-depth Anti-SSRF: validates every outbound connection and redirect target IP against private/internal address spaces.
-- Full compliance with robots.txt (supports User-Agent matches and Disallow rules).
-- Safe HTML parsing as text data; never executes JavaScript or renders external content.
+Security and Correctness Controls:
+- Standard library only (no external untrusted dependencies).
+- DNS rebinding prevention via IP-pinned connection layer (single resolution per attempt,
+  connecting directly to validated IP, verifying getpeername(), preserving TLS SNI/cert).
+- Mixed public/private DNS answers are strictly rejected.
+- Ambient proxy bypass is explicitly prevented.
+- Strict destination restrictions on initial URL, discovered links, and redirects:
+  only HTTP/HTTPS, only ports 80/443, no embedded credentials, same-host boundary.
+- RFC 9309-compliant robots.txt handling:
+  - 2xx: parse rules
+  - 404/410: allowed
+  - 401/403: disallowed
+  - 5xx / network failure / blocked redirects: disallowed (never fails open)
 - Bounded memory and network limits (per-response body cap, max crawl duration).
-- Structured schema extraction with honest null/unavailable handling (never fabricates data).
+- Structured schema extraction with honest null values (never fabricates data).
 
 Exit Codes:
     0  Crawl finished with at least one readable page (JSON status "success" or "partial")
@@ -31,6 +38,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -40,8 +48,8 @@ from collections import deque
 from html.parser import HTMLParser
 from urllib.robotparser import RobotFileParser
 
-VERSION = "2.0.0"
-USER_AGENT = "BuildSprintSiteCrawler/2.0 (bounded security-hardened crawler; honours robots.txt)"
+VERSION = "2.1.0"
+USER_AGENT = "BuildSprintSiteCrawler/2.1 (bounded security-hardened crawler; RFC 9309 compliant)"
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
 MAX_BYTES = 1_500_000  # 1.5MB body cap
 EXCERPT_CHARS = 800
@@ -52,9 +60,26 @@ SKIP_EXTENSIONS = (
 )
 EXIT_OK, EXIT_BLOCKED, EXIT_FAILED = 0, 3, 4
 
-# Email and Phone regex for contact extraction
+ALLOWED_SCHEMES = frozenset({"http", "https"})
+ALLOWED_PORTS = frozenset({80, 443})
+BLOCKED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+BLOCKED_SUFFIXES = (
+    ".localhost",
+    ".local",
+    ".localdomain",
+    ".internal",
+    ".lan",
+    ".corp",
+    ".home",
+    ".arpa",
+)
+
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b")
 PHONE_RE = re.compile(r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+
+
+class SecurityError(urllib.error.URLError):
+    """Raised when an outbound connection attempt violates SSRF/DNS-rebinding policy."""
 
 
 def log(message: str) -> None:
@@ -72,76 +97,249 @@ def private_targets_allowed() -> bool:
 
 
 def is_ip_globally_routable(ip_str: str) -> bool:
-    """Validate that an IP is global (reject loopback, private, link-local, carrier-grade NAT)."""
+    """Validate that an IP is global (reject loopback, private, link-local, carrier-grade NAT, etc.)."""
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
 
+    # Handle IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
 
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
         return False
 
+    # Check Carrier-Grade NAT (100.64.0.0/10)
     if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.IPv4Network("100.64.0.0/10"):
+        return False
+
+    # Check Documentation / benchmarking ranges (RFC 5737 / RFC 2544)
+    if isinstance(ip, ipaddress.IPv4Address) and (
+        ip in ipaddress.IPv4Network("192.0.2.0/24")
+        or ip in ipaddress.IPv4Network("198.51.100.0/24")
+        or ip in ipaddress.IPv4Network("203.0.113.0/24")
+        or ip in ipaddress.IPv4Network("198.18.0.0/15")
+    ):
         return False
 
     return ip.is_global
 
 
-def verify_host_ip_safety(host: str, port: int = 80) -> None:
-    """Verify host does not resolve to private or internal addresses before connecting."""
-    if private_targets_allowed():
-        return
+def resolve_and_validate_destination(host: str, port: int) -> tuple[str, list[str]]:
+    """Resolves hostname once, validates ALL returned IPv4 and IPv6 addresses.
 
-    # Literal IP check
+    Rejects mixed public/private answers.
+    Returns: (pinned_ip, all_ips)
+    """
+    clean_host = host.strip().lower()
+    if clean_host in BLOCKED_HOSTS or any(clean_host.endswith(sfx) for sfx in BLOCKED_SUFFIXES):
+        if not private_targets_allowed():
+            raise SecurityError(f"Host '{clean_host}' is a prohibited local/internal hostname")
+
+    # If it's already an IP literal:
     try:
-        literal = ipaddress.ip_address(host)
-        if not is_ip_globally_routable(str(literal)):
-            raise ValueError(f"Target host {host} is a private/internal IP address")
-        return
+        literal = ipaddress.ip_address(clean_host)
+        if not private_targets_allowed() and not is_ip_globally_routable(str(literal)):
+            raise SecurityError(f"Literal IP '{clean_host}' is not globally routable")
+        return str(literal), [str(literal)]
     except ValueError:
         pass
 
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(clean_host, port, type=socket.SOCK_STREAM)
     except Exception as exc:
-        raise ValueError(f"Could not resolve host {host}: {exc}") from exc
+        raise SecurityError(f"DNS resolution failed for '{clean_host}': {exc}") from exc
 
-    for info in infos:
-        raw_ip = info[4][0].split("%")[0]
-        if not is_ip_globally_routable(raw_ip):
-            raise ValueError(f"Host {host} resolved to non-public IP: {raw_ip}")
+    if not infos:
+        raise SecurityError(f"No address records found for '{clean_host}'")
+
+    all_ips = [info[4][0].split("%")[0] for info in infos]
+
+    if not private_targets_allowed():
+        # Every single returned address MUST be globally routable
+        # Reject mixed public/private answers
+        for ip in all_ips:
+            if not is_ip_globally_routable(ip):
+                raise SecurityError(
+                    f"DNS response for '{clean_host}' contained private/internal IP '{ip}'. "
+                    f"Mixed or private DNS answers are strictly rejected."
+                )
+
+    # Pin to the first validated IP
+    pinned_ip = all_ips[0]
+    return pinned_ip, all_ips
+
+
+# ---------------------------------------------------------------------------
+# IP-Pinned Connection Layer (Eliminates DNS Rebinding TOCTOU)
+# ---------------------------------------------------------------------------
+
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects directly to a pre-validated IP without re-resolving DNS."""
+
+    def __init__(self, host, port=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
+        super().__init__(host, port=port, timeout=timeout, **kwargs)
+        self.original_host = host
+        self.pinned_ip = None
+
+    def connect(self):
+        port = self.port or 80
+        if not private_targets_allowed() and port not in ALLOWED_PORTS:
+            raise SecurityError(f"Port {port} is not allowed (only 80 and 443 permitted)")
+
+        self.pinned_ip, _ = resolve_and_validate_destination(self.host, port)
+
+        sock = socket.create_connection(
+            (self.pinned_ip, port),
+            timeout=self.timeout,
+            source_address=self.source_address,
+        )
+
+        # Verify connected peer address
+        peer_ip = sock.getpeername()[0].split("%")[0]
+        if not private_targets_allowed() and not is_ip_globally_routable(peer_ip):
+            sock.close()
+            raise SecurityError(f"Connected peer IP '{peer_ip}' is not globally routable")
+
+        self.sock = sock
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that connects directly to a pre-validated IP, preserving TLS SNI and cert checks."""
+
+    def __init__(self, host, port=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
+        super().__init__(host, port=port, timeout=timeout, **kwargs)
+        self.original_host = host
+        self.pinned_ip = None
+
+    def connect(self):
+        port = self.port or 443
+        if not private_targets_allowed() and port not in ALLOWED_PORTS:
+            raise SecurityError(f"Port {port} is not allowed (only 80 and 443 permitted)")
+
+        self.pinned_ip, _ = resolve_and_validate_destination(self.host, port)
+
+        sock = socket.create_connection(
+            (self.pinned_ip, port),
+            timeout=self.timeout,
+            source_address=self.source_address,
+        )
+
+        peer_ip = sock.getpeername()[0].split("%")[0]
+        if not private_targets_allowed() and not is_ip_globally_routable(peer_ip):
+            sock.close()
+            raise SecurityError(f"Connected peer IP '{peer_ip}' is not globally routable")
+
+        # Initialize or enhance SSL Context with reliable CA store
+        if not self._context:
+            self._context = ssl.create_default_context()
+
+        cert_file = os.environ.get("SSL_CERT_FILE")
+        if cert_file and os.path.exists(cert_file):
+            try:
+                self._context.load_verify_locations(cafile=cert_file)
+            except Exception:
+                pass
+        else:
+            try:
+                import certifi
+                self._context.load_verify_locations(cafile=certifi.where())
+            except Exception:
+                pass
+
+        # Wrap socket: server_hostname MUST be self.host (original domain), NOT the IP!
+        # This preserves SNI, Host certificate verification, and prevents hostname mismatch errors
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(PinnedHTTPConnection, req)
+
+
+class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(PinnedHTTPSConnection, req)
 
 
 class AntiSsrflRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Custom redirect handler that enforces same-host and anti-SSRF checks on every hop."""
+    """Custom redirect handler that enforces destination restrictions and same-host boundary."""
 
-    def __init__(self, allowed_host: str) -> None:
+    def __init__(self, allowed_host: str, same_host_only: bool = True) -> None:
         super().__init__()
         self.allowed_host = allowed_host.lower()
+        self.same_host_only = same_host_only
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parts = urllib.parse.urlsplit(newurl)
-        if parts.scheme not in ("http", "https"):
+        try:
+            parts = urllib.parse.urlsplit(newurl)
+        except ValueError as exc:
+            log(f"Redirect blocked: malformed redirect URL {newurl}")
+            raise SecurityError(f"Redirect blocked: malformed URL {newurl}") from exc
+
+        # Scheme check: only http and https
+        if parts.scheme.lower() not in ALLOWED_SCHEMES:
             log(f"Redirect blocked: unapproved scheme '{parts.scheme}' in {newurl}")
-            return None
+            raise SecurityError(f"Redirect blocked: unapproved scheme '{parts.scheme}' in {newurl}")
+
+        # Credentials check
+        if parts.username is not None or parts.password is not None:
+            log(f"Redirect blocked: embedded credentials in {newurl}")
+            raise SecurityError(f"Redirect blocked: embedded credentials in {newurl}")
+
+        # Port restriction
+        if parts.port is not None and not private_targets_allowed():
+            if parts.port not in ALLOWED_PORTS:
+                log(f"Redirect blocked: non-standard port {parts.port} in {newurl}")
+                raise SecurityError(f"Redirect blocked: non-standard port {parts.port} in {newurl}")
+            if parts.scheme.lower() == "http" and parts.port != 80:
+                log(f"Redirect blocked: port {parts.port} not permitted for http")
+                raise SecurityError(f"Redirect blocked: port {parts.port} not permitted for http")
+            if parts.scheme.lower() == "https" and parts.port != 443:
+                log(f"Redirect blocked: port {parts.port} not permitted for https")
+                raise SecurityError(f"Redirect blocked: port {parts.port} not permitted for https")
 
         redirect_host = (parts.hostname or "").lower()
-        if redirect_host != self.allowed_host:
-            log(f"Redirect blocked: destination '{redirect_host}' leaves start host '{self.allowed_host}'")
-            return None
+        if not redirect_host:
+            log(f"Redirect blocked: missing host name in {newurl}")
+            raise SecurityError(f"Redirect blocked: missing host name in {newurl}")
 
-        port = parts.port or (443 if parts.scheme == "https" else 80)
-        try:
-            verify_host_ip_safety(redirect_host, port)
-        except ValueError as exc:
-            log(f"Redirect blocked by Anti-SSRF check: {exc}")
-            return None
+        # Same-host check if required
+        if self.same_host_only and redirect_host != self.allowed_host:
+            log(f"Redirect blocked: destination '{redirect_host}' leaves start host '{self.allowed_host}'")
+            raise SecurityError(f"Redirect blocked: destination '{redirect_host}' leaves start host '{self.allowed_host}'")
+
+        # Pre-connection IP resolution and validation (ensures destination is safe)
+        port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+        resolve_and_validate_destination(redirect_host, port)
 
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
+
+def build_safe_opener(allowed_host: str, same_host_only: bool = True) -> urllib.request.OpenerDirector:
+    """Constructs an opener with pinned IP connections, Anti-SSRF redirect enforcement,
+
+    and explicit ambient proxy disabling to guarantee destination verification.
+    """
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),  # Explicitly disable ambient proxy bypass
+        AntiSsrflRedirectHandler(allowed_host, same_host_only=same_host_only),
+        PinnedHTTPHandler(),
+        PinnedHTTPSHandler(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTML Parsing & Content Extraction
+# ---------------------------------------------------------------------------
 
 class PageParser(HTMLParser):
     """Comprehensive HTML parser: metadata, all headings H1-H6, links, and readable text."""
@@ -240,25 +438,43 @@ def canonical(url: str) -> str:
 
 
 def next_url(base_url: str, href: str, host: str) -> str | None:
-    """Return a normalized same-host URL or None if outside scope."""
+    """Return a normalized same-host URL or None if outside scope or violating restrictions."""
     try:
         absolute, _ = urllib.parse.urldefrag(urllib.parse.urljoin(base_url, href))
         parts = urllib.parse.urlsplit(absolute)
     except ValueError:
         return None
-    if parts.scheme not in ("http", "https") or (parts.hostname or "").lower() != host:
+
+    # Scheme restriction: only http and https
+    if parts.scheme.lower() not in ALLOWED_SCHEMES:
         return None
+
+    # Same host restriction
+    if (parts.hostname or "").lower() != host.lower():
+        return None
+
+    # No embedded credentials
+    if parts.username is not None or parts.password is not None:
+        return None
+
+    # Port restriction: only 80 and 443 (or None)
+    if parts.port is not None and not private_targets_allowed():
+        if parts.port not in ALLOWED_PORTS:
+            return None
+        if parts.scheme.lower() == "http" and parts.port != 80:
+            return None
+        if parts.scheme.lower() == "https" and parts.port != 443:
+            return None
+
     if parts.path.lower().endswith(SKIP_EXTENSIONS):
         return None
+
     return canonical(absolute)
 
 
-def fetch(url: str, host: str, timeout: float) -> dict:
-    """Fetch URL using opener hardened with Anti-SSRF redirect checking."""
-    port = urllib.parse.urlsplit(url).port or (443 if url.startswith("https") else 80)
-    verify_host_ip_safety(host, port)
-
-    opener = urllib.request.build_opener(AntiSsrflRedirectHandler(host))
+def fetch(url: str, host: str, timeout: float, same_host_only: bool = True) -> dict:
+    """Fetch URL using the IP-pinned safe opener."""
+    opener = build_safe_opener(host, same_host_only=same_host_only)
     request = urllib.request.Request(
         url,
         headers={
@@ -286,21 +502,47 @@ def decode(body: bytes, charset: str | None) -> str:
 
 
 def load_robots(base_url: str, host: str, timeout: float) -> tuple[RobotFileParser, str]:
-    """Fetch and parse robots.txt with safe fallback."""
+    """Fetch and parse robots.txt according to RFC 9309 rules.
+
+    - 2xx: parse rules
+    - 404/410: allowed
+    - 401/403: disallowed
+    - 5xx or connection error: disallowed (never fails open)
+    - Blocked redirect: disallowed (never fails open)
+    """
     parser = RobotFileParser()
+    robots_url = f"{base_url}/robots.txt"
     try:
-        response = fetch(f"{base_url}/robots.txt", host, timeout)
+        # Cross-authority redirects permitted for robots.txt if meeting security policy
+        response = fetch(robots_url, host, timeout, same_host_only=False)
         parser.parse(decode(response["body"], response["charset"]).splitlines())
         return parser, "found"
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             parser.parse(["User-agent: *", "Disallow: /"])
-            return parser, f"HTTP {exc.code}: crawling disallowed"
-        parser.parse([])
-        return parser, f"HTTP {exc.code}: no rules, crawling allowed"
+            return parser, f"HTTP {exc.code}: access denied, crawling disallowed (RFC 9309)"
+        elif exc.code in (404, 410):
+            parser.parse([])
+            return parser, f"HTTP {exc.code}: not found, crawling allowed (RFC 9309)"
+        elif 400 <= exc.code < 500:
+            # Other 4xx treated as unavailable -> crawling allowed per RFC 9309 2.3.1.3
+            parser.parse([])
+            return parser, f"HTTP {exc.code}: client error, crawling allowed (RFC 9309)"
+        elif 500 <= exc.code < 600:
+            # 5xx server error -> full disallow per RFC 9309 2.3.1.2
+            parser.parse(["User-agent: *", "Disallow: /"])
+            return parser, f"HTTP {exc.code}: server error, crawling disallowed (RFC 9309)"
+        else:
+            parser.parse(["User-agent: *", "Disallow: /"])
+            return parser, f"HTTP {exc.code}: unexpected error, crawling disallowed (RFC 9309)"
+    except SecurityError as exc:
+        # Redirect or connection blocked by security policy -> full disallow per RFC 9309
+        parser.parse(["User-agent: *", "Disallow: /"])
+        return parser, f"security restriction ({exc}): crawling disallowed (RFC 9309)"
     except (OSError, http.client.HTTPException, ValueError) as exc:
-        parser.parse([])
-        return parser, f"unavailable ({getattr(exc, 'reason', exc)}): crawling allowed"
+        # Network failure / unreachable -> full disallow per RFC 9309 2.3.1.2
+        parser.parse(["User-agent: *", "Disallow: /"])
+        return parser, f"unavailable ({getattr(exc, 'reason', exc)}): crawling disallowed (RFC 9309)"
 
 
 def extract_structured_fields(pages: list[dict], requested_fields: list[str]) -> dict[str, Any]:
@@ -320,7 +562,6 @@ def extract_structured_fields(pages: list[dict], requested_fields: list[str]) ->
     for f in requested_fields:
         field_clean = f.strip().lower().replace(" ", "_")
         if "company" in field_clean or "name" in field_clean:
-            # Derive from title
             title = first_page.get("title", "")
             name_cand = title.split("|")[0].split("-")[0].strip() if title else None
             structured[field_clean] = name_cand or None
@@ -334,13 +575,18 @@ def extract_structured_fields(pages: list[dict], requested_fields: list[str]) ->
                 contacts["phones"] = list(set(phones))[:3]
             structured[field_clean] = contacts if contacts else None
         elif "service" in field_clean:
-            service_headings = [h for h in all_headings if any(k in h.lower() for k in ("service", "solution", "what we do", "features"))]
+            service_headings = [
+                h for h in all_headings
+                if any(k in h.lower() for k in ("service", "solution", "what we do", "features"))
+            ]
             structured[field_clean] = service_headings[:5] if service_headings else None
         elif "product" in field_clean or "categor" in field_clean:
-            prod_headings = [h for h in all_headings if any(k in h.lower() for k in ("product", "category", "offerings", "catalog"))]
+            prod_headings = [
+                h for h in all_headings
+                if any(k in h.lower() for k in ("product", "category", "offerings", "catalog"))
+            ]
             structured[field_clean] = prod_headings[:5] if prod_headings else None
         else:
-            # Check if any heading matches
             matches = [h for h in all_headings if field_clean in h.lower()]
             structured[field_clean] = matches[:3] if matches else None
 
@@ -356,16 +602,82 @@ def crawl(
     schema_fields: list[str] | None = None,
     max_total_duration: float = 90.0,
 ) -> dict:
-    start = urllib.parse.urlsplit(start_url)
+    try:
+        start = urllib.parse.urlsplit(start_url)
+    except ValueError as exc:
+        return {
+            "blocked": False,
+            "pages": [],
+            "errors": [{"url": start_url, "error": f"Malformed start URL: {exc}"}],
+            "attempts": 0,
+            "robots_note": "check blocked",
+        }
+
+    # Validate scheme
+    if start.scheme.lower() not in ALLOWED_SCHEMES:
+        return {
+            "blocked": False,
+            "pages": [],
+            "errors": [{"url": start_url, "error": f"Scheme '{start.scheme}' not allowed (only http/https)"}],
+            "attempts": 0,
+            "robots_note": "check blocked",
+        }
+
+    # Validate credentials
+    if start.username is not None or start.password is not None:
+        return {
+            "blocked": False,
+            "pages": [],
+            "errors": [{"url": start_url, "error": "URLs with embedded credentials are not allowed"}],
+            "attempts": 0,
+            "robots_note": "check blocked",
+        }
+
+    # Validate port
+    if start.port is not None and not private_targets_allowed():
+        if start.port not in ALLOWED_PORTS:
+            return {
+                "blocked": False,
+                "pages": [],
+                "errors": [{"url": start_url, "error": f"Port {start.port} not allowed (only 80 and 443 permitted)"}],
+                "attempts": 0,
+                "robots_note": "check blocked",
+            }
+        if start.scheme.lower() == "http" and start.port != 80:
+            return {
+                "blocked": False,
+                "pages": [],
+                "errors": [{"url": start_url, "error": f"Port {start.port} not allowed for http"}],
+                "attempts": 0,
+                "robots_note": "check blocked",
+            }
+        if start.scheme.lower() == "https" and start.port != 443:
+            return {
+                "blocked": False,
+                "pages": [],
+                "errors": [{"url": start_url, "error": f"Port {start.port} not allowed for https"}],
+                "attempts": 0,
+                "robots_note": "check blocked",
+            }
+
     host = (start.hostname or "").lower()
+    if not host:
+        return {
+            "blocked": False,
+            "pages": [],
+            "errors": [{"url": start_url, "error": "URL has no host name"}],
+            "attempts": 0,
+            "robots_note": "check blocked",
+        }
+
     base_origin = f"{start.scheme}://{start.netloc}"
 
-    # Verify IP safety before touching network
-    port = start.port or (443 if start.scheme == "https" else 80)
+    # Pre-flight resolution and IP safety verification
+    port = start.port or (443 if start.scheme.lower() == "https" else 80)
     try:
-        verify_host_ip_safety(host, port)
-    except ValueError as exc:
-        log(f"Start URL blocked by Anti-SSRF check: {exc}")
+        resolve_and_validate_destination(host, port)
+    except SecurityError as exc:
+        log(f"Start URL blocked by destination validation: {exc}")
         return {
             "blocked": False,
             "pages": [],
@@ -407,9 +719,12 @@ def crawl(
         attempts += 1
         log(f"fetching page {len(pages) + 1}/{max_pages} (depth {depth}): {url}")
         try:
-            response = fetch(url, host, timeout)
+            response = fetch(url, host, timeout, same_host_only=True)
         except urllib.error.HTTPError as exc:
             errors.append({"url": url, "error": f"HTTP {exc.code}"})
+            continue
+        except SecurityError as exc:
+            errors.append({"url": url, "error": f"Security restriction: {exc}"})
             continue
         except (OSError, http.client.HTTPException, ValueError) as exc:
             errors.append({"url": url, "error": f"request failed: {getattr(exc, 'reason', exc)}"})
@@ -492,10 +807,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--delay must be between 0.0 and 5.0 seconds")
 
     parts = urllib.parse.urlsplit(args.url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    if parts.scheme.lower() not in ALLOWED_SCHEMES or not parts.netloc:
         parser.error("--url must be an absolute http(s) URL")
 
-    schema_fields = [f.strip() for f in args.extract_schema.split(",") if f.strip()] if args.extract_schema else []
+    schema_fields = (
+        [f.strip() for f in args.extract_schema.split(",") if f.strip()]
+        if args.extract_schema
+        else []
+    )
 
     started = time.monotonic()
     try:

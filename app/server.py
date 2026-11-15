@@ -27,6 +27,7 @@ from .database import Database
 from .intent import IntentError, parse_intent
 from .registry import list_tools
 from .tasks import QueueFullError, TaskManager
+from .validation import enforce_startup_safety
 
 log = logging.getLogger("buildsprint.server")
 
@@ -272,10 +273,25 @@ class ChatHandler(BaseHTTPRequestHandler):
         log.info("%s %s", self.address_string(), fmt % args)
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | None = None) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), ChatHandler)
+class MAIChatServer(ThreadingHTTPServer):
+    """Threading HTTP server with coordinated TaskManager lifecycle management."""
+
+    manager: TaskManager
+
+    def server_close(self) -> None:
+        if hasattr(self, "manager") and self.manager:
+            try:
+                self.manager.shutdown()
+            except Exception:
+                log.exception("Error shutting down TaskManager during server_close")
+        super().server_close()
+
+
+def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | None = None) -> MAIChatServer:
+    enforce_startup_safety(host)
+    httpd = MAIChatServer((host, port), ChatHandler)
     db = Database(db_path) if db_path else None
-    httpd.manager = TaskManager(db=db)  # type: ignore[attr-defined]
+    httpd.manager = TaskManager(db=db)
     return httpd
 
 

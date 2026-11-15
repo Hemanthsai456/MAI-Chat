@@ -38,7 +38,6 @@ CHILD_ENV_ALLOWLIST = (
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
     "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
-    "BUILDSPRINT_ALLOW_PRIVATE_TARGETS",
 )
 
 # Backward-compatibility alias
@@ -169,6 +168,16 @@ def run_approved_tool(
             env["SSL_CERT_FILE"] = certifi.where()
         except ImportError:
             pass
+
+    # Restrict BUILDSPRINT_ALLOW_PRIVATE_TARGETS strictly to explicit test runs
+    is_test_env = (
+        os.environ.get("MAI_TESTING") == "1"
+        or "unittest" in sys.modules
+        or "pytest" in sys.modules
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+    if is_test_env and os.environ.get("BUILDSPRINT_ALLOW_PRIVATE_TARGETS") == "1":
+        env["BUILDSPRINT_ALLOW_PRIVATE_TARGETS"] = "1"
 
     timed_out = cancelled = False
     started = time.monotonic()

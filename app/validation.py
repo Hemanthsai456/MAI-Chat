@@ -2,12 +2,12 @@
 
 Enforces strict defense-in-depth:
 - Protocol schemes allowlist (http, https)
-- Port allowlist (80, 443)
+- Port allowlist (80, 443 only)
 - No embedded credentials (user:pass@host)
 - RFC 1918 / RFC 4193 / RFC 4291 / RFC 3927 private, loopback, link-local, and carrier-grade NAT blocks
 - IPv4-mapped IPv6 normalization and validation
-- DNS resolution inspection (all resolved addresses must be globally routable)
-- Configurable test bypass switch (BUILDSPRINT_ALLOW_PRIVATE_TARGETS=1) exclusively for offline fixture testing.
+- DNS resolution inspection (all resolved addresses must be globally routable; rejects mixed answers)
+- Startup safety enforcement for test bypass (BUILDSPRINT_ALLOW_PRIVATE_TARGETS=1).
 """
 from __future__ import annotations
 
@@ -43,6 +43,18 @@ def private_targets_allowed() -> bool:
     lets users make the server fetch internal network addresses.
     """
     return os.environ.get("BUILDSPRINT_ALLOW_PRIVATE_TARGETS") == "1"
+
+
+def enforce_startup_safety(bind_host: str) -> None:
+    """Refuse server startup if private target bypass is enabled on a non-loopback host."""
+    if private_targets_allowed():
+        clean_host = bind_host.strip().lower()
+        if clean_host not in ("127.0.0.1", "localhost", "::1"):
+            raise RuntimeError(
+                f"FATAL SECURITY CONFIGURATION: BUILDSPRINT_ALLOW_PRIVATE_TARGETS is set to 1, "
+                f"but server is configured to bind to non-loopback address '{bind_host}'. "
+                f"The private-target bypass is strictly permitted on loopback/localhost only."
+            )
 
 
 def normalise_url(raw: object) -> str:
@@ -85,11 +97,27 @@ def is_ip_globally_routable(ip_str: str) -> bool:
         ip = ip.ipv4_mapped
 
     # Check standard attributes
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
         return False
 
     # Check Carrier-Grade NAT (100.64.0.0/10)
     if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.IPv4Network("100.64.0.0/10"):
+        return False
+
+    # Check Documentation prefixes (RFC 5737 / RFC 3849)
+    if isinstance(ip, ipaddress.IPv4Address) and (
+        ip in ipaddress.IPv4Network("192.0.2.0/24")
+        or ip in ipaddress.IPv4Network("198.51.100.0/24")
+        or ip in ipaddress.IPv4Network("203.0.113.0/24")
+        or ip in ipaddress.IPv4Network("198.18.0.0/15")
+    ):
         return False
 
     return ip.is_global
@@ -104,7 +132,10 @@ def _require_global(ip: ipaddress._BaseAddress) -> None:
 
 
 def validate_public_url(raw: object) -> str:
-    """Full check before crawling: syntax, blocked names, and public IP addresses only."""
+    """Full check before crawling: syntax, blocked names, and public IP addresses only.
+
+    Rejects any hostname whose DNS response includes private/internal addresses.
+    """
     url = normalise_url(raw)
     if private_targets_allowed():
         return url
@@ -126,6 +157,9 @@ def validate_public_url(raw: object) -> str:
         raise ValidationError(
             f"could not resolve '{host}'; the site may not exist or may be offline"
         ) from None
+    if not infos:
+        raise ValidationError(f"could not resolve '{host}'; no address records found")
+
     for info in infos:
         raw_ip = info[4][0].split("%")[0]
         _require_global(ipaddress.ip_address(raw_ip))

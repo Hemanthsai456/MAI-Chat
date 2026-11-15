@@ -2,8 +2,8 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 45 Passed](https://img.shields.io/badge/tests-45%20passed-brightgreen.svg)](tests/)
-[![Security: Hardened](https://img.shields.io/badge/security-Anti--SSRF%20%7C%20shell%3DFalse-red.svg)](docs/SECURITY.md)
+[![Tests: 63 Passed](https://img.shields.io/badge/tests-63%20passed-brightgreen.svg)](tests/)
+[![Security: Hardened](https://img.shields.io/badge/security-Anti--SSRF%20%7C%20IP--Pinned%20%7C%20RFC%209309-red.svg)](docs/SECURITY.md)
 
 **MAI-Chat** is a production-grade, secure, and extensible AI execution workspace developed for **BuildSprint Round 2**. 
 
@@ -27,13 +27,15 @@ In traditional AI chat implementations, conversational assistants generate simul
 
 ## 2. Key Features
 
-- **Approved CLI Tool Registry:** Modular tool registry (`app/registry.py`) with parameter specifications, type checking, and boundary limits.
+- **Approved CLI Tool Registry:** Modular tool registry (`app/registry.py`) with parameter specifications, type checking, boundary limits, and strict schema validation.
 - **Dual-Layer Intent Engine:** Deterministic rule-based engine (100% offline, zero-dependency) with an optional structured LLM planner interface.
 - **Real-Time 10-Stage Pipeline Visualizer:** Interactive frontend timeline tracking real backend execution states without simulated progress.
-- **Persistent Task History:** Durable SQLite storage (with WAL mode) supporting task browsing, inspection, and restart recovery.
-- **Bounded Worker Pool & Queue:** Fixed worker pool (`MAI_MAX_WORKERS`) and bounded queue capacity (`MAI_QUEUE_CAPACITY`) preventing thread exhaustion and process storms.
+- **Persistent Task History:** Durable SQLite storage (with WAL mode) supporting task browsing, inspection, versioned migrations, and restart recovery.
+- **Atomic Bounded Queue & Worker Pool:** Fixed worker pool (`MAI_MAX_WORKERS`) and atomic bounded queue admission (`MAI_QUEUE_CAPACITY`, via `put_nowait`) preventing thread exhaustion, race conditions, and queue overflows.
+- **Coordinated Graceful Shutdown:** `TaskManager.shutdown()` cancels running subprocess trees, drains unstarted tasks, joins workers, and closes database connections cleanly.
 - **Streaming Bounded Output Capture:** Daemon stream readers cap stdout/stderr in-flight, preventing pipe deadlocks and memory flooding.
-- **Anti-SSRF Defense-in-Depth:** Dual-layer network protection blocking RFC 1918 private IPs, AWS/GCP metadata (`169.254.169.254`), Carrier-Grade NAT, IPv4-mapped IPv6, and malicious redirects.
+- **DNS Rebinding Prevention & Anti-SSRF:** IP-pinned socket connection layer (`PinnedHTTPConnection` / `PinnedHTTPSConnection`) resolving host once, verifying all IP addresses, and connecting directly to pinned IP. Rejects mixed DNS answers and disables ambient proxy bypass.
+- **RFC 9309 Robots.txt Policy:** Full RFC 9309 compliance: 2xx parses rules, 404/410 allows crawling, 401/403 disallows crawling, and 5xx / network failures strictly disallow crawling (never fails open).
 - **Cross-Platform Lifecycle Termination:** Clean process tree termination on both Windows (`taskkill /F /T`) and POSIX (`killpg`).
 - **Export Formats:** One-click downloads for JSON payloads, formatted Markdown reports, and tabular CSV data.
 - **Modern Responsive UI:** Clean vanilla web workspace with Dark and Light themes, accessibility controls, and keyboard navigation.
@@ -197,7 +199,7 @@ http://127.0.0.1:8000
 The automated test suite runs offline without requiring open internet access:
 
 ```bash
-# Run all tests (45 tests covering execution, crawling, security, and persistence)
+# Run all tests (63 tests covering execution, crawling, security remediation, and persistence)
 python -m unittest discover -s tests -p "test_*.py"
 ```
 

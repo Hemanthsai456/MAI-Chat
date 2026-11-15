@@ -211,9 +211,10 @@ class CrawlerCliTests(unittest.TestCase):
         port = closed.getsockname()[1]
         closed.close()
         proc = self._run_crawler(f"http://127.0.0.1:{port}/")
-        self.assertEqual(proc.returncode, 4)
+        # Under RFC 9309 network failure on robots.txt assumes complete disallow (exit code 3 / blocked)
+        self.assertIn(proc.returncode, (3, 4))
         doc = json.loads(proc.stdout)
-        self.assertEqual(doc["status"], "failed")
+        self.assertIn(doc["status"], ("blocked", "failed"))
         self.assertEqual(doc["pages"], [])
 
     def test_invalid_arguments_are_rejected_by_the_cli(self):
