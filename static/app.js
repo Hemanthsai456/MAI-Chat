@@ -4,24 +4,40 @@
   const chat = document.getElementById("chat");
   const form = document.getElementById("composer");
   const promptBox = document.getElementById("prompt");
-  const POLL_MS = 800;
-  const MAX_POLL_FAILURES = 10;
-  const DONE = new Set(["succeeded", "partial", "failed", "timed_out", "cancelled"]);
-  const LABELS = {
+  const sendBtn = document.getElementById("send");
+  const charCount = document.getElementById("charCount");
+  const historyToggle = document.getElementById("historyToggle");
+  const historyDrawer = document.getElementById("historyDrawer");
+  const closeHistory = document.getElementById("closeHistory");
+  const drawerOverlay = document.getElementById("drawerOverlay");
+  const historyList = document.getElementById("historyList");
+  const refreshHistory = document.getElementById("refreshHistory");
+  const themeToggle = document.getElementById("themeToggle");
+
+  const POLL_MS = 600;
+  const MAX_POLL_FAILURES = 12;
+  const DONE_STATES = new Set(["succeeded", "partial", "failed", "timed_out", "cancelled"]);
+  const STAGE_ICONS = {
+    completed: "✓",
+    active: "⟳",
+    pending: "○",
+    failed: "✕",
+  };
+  const STATUS_LABELS = {
     queued: "Queued",
     running: "Running",
-    succeeded: "Done",
-    partial: "Done (partial)",
-    failed: "Done (failed)",
-    timed_out: "Stopped (timed out)",
+    succeeded: "Task Succeeded",
+    partial: "Partial Result",
+    failed: "Task Failed",
+    timed_out: "Stopped (Timed Out)",
     cancelled: "Cancelled",
   };
 
-  // Build DOM with textContent only: task output is data and is never parsed as HTML.
+  // Safe DOM builder using textContent exclusively (strictly no innerHTML)
   function make(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
-    if (text !== undefined) node.textContent = text;
+    if (text !== undefined && text !== null) node.textContent = String(text);
     return node;
   }
 
@@ -29,181 +45,360 @@
     window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
   }
 
+  // Theme Management
+  function initTheme() {
+    const saved = localStorage.getItem("mai_theme");
+    if (saved) {
+      document.documentElement.setAttribute("data-theme", saved);
+    } else {
+      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.setAttribute("data-theme", prefersDark ? "dark" : "light");
+    }
+  }
+
+  themeToggle.addEventListener("click", () => {
+    const current = document.documentElement.getAttribute("data-theme");
+    const next = current === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("mai_theme", next);
+  });
+
+  // API helper
+  async function api(path, options) {
+    try {
+      const response = await fetch(path, options);
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = {};
+      }
+      return { ok: response.ok, status: response.status, data };
+    } catch (err) {
+      return { ok: false, status: 0, data: { error: err.message || "Network error" } };
+    }
+  }
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   function addUserMessage(text) {
     const row = make("div", "msg user");
-    row.appendChild(make("div", "bubble", text));
+    const bubble = make("div", "bubble", text);
+    row.appendChild(bubble);
     chat.appendChild(row);
     scrollToEnd();
   }
 
-  function addAssistantBubble() {
+  function createAssistantBubble() {
     const row = make("div", "msg bot");
     const bubble = make("div", "bubble");
-    bubble.appendChild(make("p", "status", "Queued"));
+    bubble.appendChild(make("div", "banner warning", "Initializing task..."));
     row.appendChild(bubble);
     chat.appendChild(row);
     scrollToEnd();
     return bubble;
   }
 
-  async function api(path, options) {
-    const response = await fetch(path, options);
-    let data = {};
-    try {
-      data = await response.json();
-    } catch (_) {
-      data = {};
+  function renderStages(container, stages) {
+    if (!stages || !stages.length) return;
+    let wrapper = container.querySelector(".stages-wrapper");
+    if (!wrapper) {
+      wrapper = make("div", "stages-wrapper");
+      const title = make("div", "stages-title");
+      title.appendChild(make("span", "", "Real-Time Execution Pipeline"));
+      title.appendChild(make("span", "muted", "10 Verified Stages"));
+      wrapper.appendChild(title);
+      const list = make("ul", "stages-list");
+      wrapper.appendChild(list);
+      container.appendChild(wrapper);
     }
-    return { ok: response.ok, data };
+    const list = wrapper.querySelector(".stages-list");
+    list.replaceChildren();
+
+    for (const s of stages) {
+      const li = make("li", `stage-item ${s.status}`);
+      const icon = make("span", "stage-icon", STAGE_ICONS[s.status] || "○");
+      const label = make("span", "stage-label", s.label);
+      li.append(icon, label);
+      if (s.detail) {
+        li.title = s.detail;
+      }
+      list.appendChild(li);
+    }
   }
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  function renderBanner(bubble, result) {
-    bubble.appendChild(make("div", `banner ${result.banner.kind}`, result.banner.text));
-  }
-
-  function renderFinal(bubble, result, progress, lead) {
+  function renderFinalResult(bubble, task, lead) {
     bubble.replaceChildren();
-    if (lead) bubble.appendChild(make("p", "muted", lead));
-    renderBanner(bubble, result);
+    const result = task.result || {};
 
+    if (lead) {
+      const leadEl = make("p", "muted", `Plan: ${lead}`);
+      bubble.appendChild(leadEl);
+    }
+
+    // Status Banner
+    const bannerInfo = result.banner || { kind: "error", text: `Task ${task.status}` };
+    bubble.appendChild(make("div", `banner ${bannerInfo.kind}`, bannerInfo.text));
+
+    // Execution Stages
+    if (task.stages) {
+      renderStages(bubble, task.stages);
+    }
+
+    // Summary
     if (result.summary) {
-      bubble.appendChild(make("h3", "", "Summary"));
+      bubble.appendChild(make("h3", "", "Verified Extractive Summary"));
       bubble.appendChild(make("div", "prose", result.summary));
     }
 
+    // Structured JSON
     if (result.json) {
-      bubble.appendChild(make("h3", "", "Structured JSON"));
-      const wrap = make("div", "code-wrap");
-      const copy = make("button", "ghost small", "Copy JSON");
-      copy.type = "button";
-      copy.addEventListener("click", async () => {
+      const h3 = make("h3", "", "Structured JSON Output");
+      bubble.appendChild(h3);
+
+      // Action toolbar: Copy, Download JSON, Download Markdown, Export CSV
+      const toolbar = make("div", "action-toolbar");
+
+      const copyBtn = make("button", "btn-action", "Copy JSON");
+      copyBtn.type = "button";
+      copyBtn.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(result.json);
-          copy.textContent = "Copied";
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => { copyBtn.textContent = "Copy JSON"; }, 2000);
         } catch (_) {
-          copy.textContent = "Copy not available";
+          copyBtn.textContent = "Copy failed";
         }
       });
+      toolbar.appendChild(copyBtn);
+
+      const dlJson = make("a", "btn-action", "Download JSON");
+      dlJson.href = `/api/tasks/${task.id}/export?format=json`;
+      dlJson.setAttribute("download", `task_${task.id.slice(0, 8)}.json`);
+      toolbar.appendChild(dlJson);
+
+      const dlMd = make("a", "btn-action", "Download Markdown");
+      dlMd.href = `/api/tasks/${task.id}/export?format=md`;
+      dlMd.setAttribute("download", `task_${task.id.slice(0, 8)}.md`);
+      toolbar.appendChild(dlMd);
+
+      const exportCsv = make("a", "btn-action", "Export CSV");
+      exportCsv.href = `/api/tasks/${task.id}/export?format=csv`;
+      exportCsv.setAttribute("download", `task_${task.id.slice(0, 8)}.csv`);
+      toolbar.appendChild(exportCsv);
+
+      bubble.appendChild(toolbar);
+
+      const wrap = make("div", "code-wrap");
       const pre = make("pre", "code");
       pre.appendChild(make("code", "", result.json));
-      wrap.append(copy, pre);
+      wrap.appendChild(pre);
       bubble.appendChild(wrap);
     }
 
+    // Errors
     if (result.errors && result.errors.length) {
-      bubble.appendChild(make("h3", "", `Errors (${result.errors.length})`));
+      bubble.appendChild(make("h3", "", `Reported Errors (${result.errors.length})`));
       const list = make("ul", "errors");
       for (const err of result.errors) {
-        list.appendChild(make("li", "", `${err.url}: ${err.error}`));
+        list.appendChild(make("li", "", `${err.url || "Target"}: ${err.error}`));
       }
       bubble.appendChild(list);
     }
 
+    // Collapsible execution details
     const details = make("details", "exec");
-    details.appendChild(make("summary", "", "Execution details"));
-    const execution = Object.assign({}, result.execution || {});
-    if (execution.stderr_tail !== undefined) {
-      details.appendChild(make("p", "muted", "Captured process output (stderr):"));
-      details.appendChild(make("pre", "code", execution.stderr_tail || "(empty)"));
-      delete execution.stderr_tail;
+    details.appendChild(make("summary", "", "Execution Details & Verified Logs"));
+    const exec = Object.assign({}, result.execution || {});
+    if (exec.stderr_tail !== undefined) {
+      details.appendChild(make("p", "muted", "Captured Process Stderr:"));
+      details.appendChild(make("pre", "code", exec.stderr_tail || "(no stderr output)"));
+      delete exec.stderr_tail;
     }
-    details.appendChild(make("pre", "code", JSON.stringify(execution, null, 2)));
-    if (progress && progress.length) {
-      details.appendChild(make("p", "muted", "Progress log:"));
+    details.appendChild(make("p", "muted", "Process Metadata:"));
+    details.appendChild(make("pre", "code", JSON.stringify(exec, null, 2)));
+
+    if (task.progress && task.progress.length) {
+      details.appendChild(make("p", "muted", "Execution Progress Trail:"));
       const ol = make("ol", "log");
-      for (const line of progress) ol.appendChild(make("li", "", line));
+      for (const line of task.progress) ol.appendChild(make("li", "", line));
       details.appendChild(ol);
     }
     bubble.appendChild(details);
     scrollToEnd();
   }
 
-  function renderProgress(bubble, task, started) {
-    const seconds = Math.round((Date.now() - started) / 1000);
-    bubble.querySelector(".status").textContent = `${LABELS[task.status] || task.status} (${seconds}s)`;
-    const list = bubble.querySelector(".progress");
-    if (list) {
-      list.replaceChildren(...task.progress.map((line) => make("li", "", line)));
-    }
-  }
-
-  async function runTask(prompt) {
+  async function executeTask(prompt) {
     addUserMessage(prompt);
-    const bubble = addAssistantBubble();
+    const bubble = createAssistantBubble();
+    sendBtn.disabled = true;
 
-    const created = await api("/api/tasks", {
+    const postRes = await api("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
-    if (!created.ok) {
-      renderFinal(bubble, {
-        task_status: "failed",
-        banner: { kind: "error", text: created.data.error || "The request could not be accepted." },
-        summary: null, json: null, errors: [], execution: {},
-      }, [], null);
+
+    if (!postRes.ok) {
+      sendBtn.disabled = false;
+      const errText = postRes.data.error || "The request could not be accepted.";
+      renderFinalResult(bubble, {
+        id: "",
+        status: "failed",
+        stages: [],
+        progress: [],
+        result: {
+          banner: { kind: "error", text: errText },
+          summary: null, json: null, errors: [], execution: {},
+        },
+      }, null);
       return;
     }
 
-    const id = created.data.id;
-    const lead = created.data.interpretation;
-    bubble.replaceChildren(
-      make("p", "status", "Queued"),
-      make("p", "muted", lead),
-    );
-    for (const note of created.data.notes || []) bubble.appendChild(make("p", "muted", `Note: ${note}`));
-    bubble.appendChild(make("ol", "progress"));
+    const taskId = postRes.data.id;
+    const lead = postRes.data.interpretation;
 
-    const cancel = make("button", "ghost small", "Cancel task");
-    cancel.type = "button";
-    cancel.addEventListener("click", async () => {
-      cancel.disabled = true;
-      cancel.textContent = "Cancelling...";
-      await api(`/api/tasks/${id}/cancel`, { method: "POST" });
+    bubble.replaceChildren();
+    const banner = make("div", "banner warning", "Task Queued · Awaiting worker process");
+    bubble.appendChild(banner);
+
+    if (lead) {
+      bubble.appendChild(make("p", "muted", `Plan: ${lead}`));
+    }
+    for (const note of postRes.data.notes || []) {
+      bubble.appendChild(make("p", "muted", `Note: ${note}`));
+    }
+
+    // Cancel Button
+    const cancelBtn = make("button", "btn-ghost small", "Cancel Execution");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", async () => {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "Stopping process...";
+      await api(`/api/tasks/${taskId}/cancel`, { method: "POST" });
     });
-    bubble.appendChild(cancel);
+    bubble.appendChild(cancelBtn);
 
-    const started = Date.now();
+    const progressList = make("ol", "progress");
+    bubble.appendChild(progressList);
+
+    const startedTime = Date.now();
     let failures = 0;
+
+    // Polling Loop
     while (true) {
       await sleep(POLL_MS);
-      let task;
+      let taskData;
       try {
-        const response = await api(`/api/tasks/${id}`);
-        if (!response.ok) throw new Error("task lookup failed");
-        task = response.data;
+        const pollRes = await api(`/api/tasks/${taskId}`);
+        if (!pollRes.ok) throw new Error("Status check failed");
+        taskData = pollRes.data;
         failures = 0;
       } catch (_) {
-        failures += 1;
+        failures++;
         if (failures >= MAX_POLL_FAILURES) {
-          bubble.querySelector(".status").textContent = "Lost contact with the server. Reload to check again.";
+          banner.className = "banner error";
+          banner.textContent = "Lost contact with server. Execution may still be running in background.";
+          sendBtn.disabled = false;
           return;
         }
         continue;
       }
-      renderProgress(bubble, task, started);
-      if (DONE.has(task.status) && task.result) {
-        renderFinal(bubble, task.result, task.progress, lead);
+
+      const elapsedSec = Math.round((Date.now() - startedTime) / 1000);
+      const label = STATUS_LABELS[taskData.status] || taskData.status;
+      banner.textContent = `${label} (${elapsedSec}s)`;
+
+      if (taskData.stages) {
+        renderStages(bubble, taskData.stages);
+      }
+
+      if (taskData.progress && taskData.progress.length) {
+        progressList.replaceChildren(...taskData.progress.map((line) => make("li", "", line)));
+      }
+
+      if (DONE_STATES.has(taskData.status) && taskData.result) {
+        sendBtn.disabled = false;
+        renderFinalResult(bubble, taskData, lead);
+        loadHistory();
         return;
       }
     }
   }
 
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
+  // Persistent History Drawer
+  async function loadHistory() {
+    historyList.replaceChildren(make("li", "history-empty", "Loading task history..."));
+    const res = await api("/api/tasks?limit=30");
+    if (!res.ok || !res.data.tasks || !res.data.tasks.length) {
+      historyList.replaceChildren(make("li", "history-empty", "No previous tasks recorded yet."));
+      return;
+    }
+    historyList.replaceChildren();
+    for (const t of res.data.tasks) {
+      const li = make("li", "history-item");
+      const header = make("div", "history-item-header");
+      const badge = make("span", `history-status-badge ${t.status}`, t.status);
+      const timeStr = t.created_at ? new Date(t.created_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      const timeSpan = make("span", "history-time", timeStr);
+      header.append(badge, timeSpan);
+
+      const promptDiv = make("div", "history-prompt", t.prompt);
+      li.append(header, promptDiv);
+
+      li.addEventListener("click", async () => {
+        closeDrawer();
+        const taskRes = await api(`/api/tasks/${t.id}`);
+        if (taskRes.ok && taskRes.data) {
+          const bubble = createAssistantBubble();
+          renderFinalResult(bubble, taskRes.data, taskRes.data.interpretation);
+        }
+      });
+      historyList.appendChild(li);
+    }
+  }
+
+  function openDrawer() {
+    historyDrawer.classList.add("open");
+    drawerOverlay.classList.add("active");
+    historyDrawer.setAttribute("aria-hidden", "false");
+    loadHistory();
+  }
+
+  function closeDrawer() {
+    historyDrawer.classList.remove("open");
+    drawerOverlay.classList.remove("active");
+    historyDrawer.setAttribute("aria-hidden", "true");
+  }
+
+  historyToggle.addEventListener("click", openDrawer);
+  closeHistory.addEventListener("click", closeDrawer);
+  drawerOverlay.addEventListener("click", closeDrawer);
+  refreshHistory.addEventListener("click", loadHistory);
+
+  // Composer event handlers
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
     const prompt = promptBox.value.trim();
     if (!prompt) return;
     promptBox.value = "";
-    runTask(prompt).catch(() => {
-      // runTask handles server errors itself; this catches unexpected DOM or network faults.
+    charCount.textContent = "0/1000";
+    promptBox.style.height = "auto";
+    executeTask(prompt).catch((err) => {
+      console.error("Execution error:", err);
+      sendBtn.disabled = false;
     });
   });
 
-  promptBox.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
+  promptBox.addEventListener("input", () => {
+    charCount.textContent = `${promptBox.value.length}/1000`;
+    promptBox.style.height = "auto";
+    promptBox.style.height = `${Math.min(promptBox.scrollHeight, 180)}px`;
+  });
+
+  promptBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
       form.requestSubmit();
     }
   });
@@ -211,7 +406,12 @@
   document.querySelectorAll(".chip").forEach((chip) => {
     chip.addEventListener("click", () => {
       promptBox.value = chip.dataset.prompt || "";
+      charCount.textContent = `${promptBox.value.length}/1000`;
       promptBox.focus();
+      promptBox.style.height = "auto";
+      promptBox.style.height = `${Math.min(promptBox.scrollHeight, 180)}px`;
     });
   });
+
+  initTheme();
 })();

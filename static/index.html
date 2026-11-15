@@ -1,35 +1,105 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Website Task Chat</title>
+  <title>MAI-Chat — Website Task Chat (CLI Execution Platform)</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="top">
-    <h1>Website Task Chat</h1>
-    <p class="sub">Each request starts a real <code>site-crawler</code> process on the server. Results come from its captured output.</p>
+  <!-- Header Navbar -->
+  <header class="top-nav">
+    <div class="nav-container">
+      <div class="brand">
+        <div class="logo-badge">CLI</div>
+        <div class="brand-text">
+          <h1>MAI-Chat</h1>
+          <span class="sub-badge">BuildSprint Round 2 · Verified Subprocess Engine</span>
+        </div>
+      </div>
+      <div class="nav-controls">
+        <div class="engine-status" id="engineStatus" title="Engine Status">
+          <span class="status-dot online"></span>
+          <span class="status-label">Online</span>
+        </div>
+        <button type="button" class="btn-ghost" id="historyToggle" title="View Task History" aria-label="View Task History">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          <span>History</span>
+        </button>
+        <button type="button" class="btn-ghost" id="themeToggle" title="Toggle Theme" aria-label="Toggle Theme">
+          <svg class="sun-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+          <svg class="moon-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        </button>
+      </div>
+    </div>
   </header>
 
-  <main id="chat" aria-live="polite">
+  <!-- Main Chat Workspace -->
+  <main id="chat" class="chat-container" aria-live="polite">
     <div class="msg bot">
-      <div class="bubble">
-        <p>Give me a website and a task. For example:</p>
-        <div class="examples">
-          <button type="button" class="chip" data-prompt="Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.">Crawl example.com</button>
-          <button type="button" class="chip" data-prompt="Crawl https://example.com up to 2 pages and summarise it.">Up to 2 pages</button>
-          <button type="button" class="chip" data-prompt="Summarise https://this-domain-does-not-exist-buildsprint.com">Unreachable site (error demo)</button>
+      <div class="bubble welcome-bubble">
+        <div class="welcome-header">
+          <h2>Natural Language to Verified CLI Execution</h2>
+          <p>Every request is converted into a validated execution plan, launched as an approved CLI subprocess with <code>shell=False</code>, and results are verified before being returned.</p>
+        </div>
+        <div class="quick-prompts">
+          <span class="prompts-label">Try an example task:</span>
+          <div class="examples">
+            <button type="button" class="chip chip-primary" data-prompt="Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.">
+              ★ Mandatory Demo (example.com)
+            </button>
+            <button type="button" class="chip" data-prompt="Visit https://example.com and extract its company name, services, contact information and product categories in JSON.">
+              Structured Schema Extraction
+            </button>
+            <button type="button" class="chip" data-prompt="Crawl https://example.com up to 2 pages and summarise it.">
+              Bounded Limit (2 pages)
+            </button>
+            <button type="button" class="chip chip-warn" data-prompt="Summarise https://this-domain-does-not-exist-buildsprint.com">
+              Unreachable Host (Failure Demo)
+            </button>
+          </div>
         </div>
       </div>
     </div>
   </main>
 
-  <form id="composer" autocomplete="off">
-    <label class="visually-hidden" for="prompt">Task</label>
-    <textarea id="prompt" rows="2" maxlength="1000" placeholder="Crawl https://example.com, summarise it and return JSON."></textarea>
-    <button type="submit" id="send">Send</button>
-  </form>
+  <!-- Fixed Bottom Composer -->
+  <footer class="composer-wrap">
+    <form id="composer" autocomplete="off">
+      <label class="visually-hidden" for="prompt">Task instruction</label>
+      <div class="input-area">
+        <textarea id="prompt" rows="1" maxlength="1000" placeholder="Ask to crawl a site, extract data, or generate a JSON report (e.g. Crawl https://example.com)..."></textarea>
+        <div class="composer-meta">
+          <span id="charCount" class="char-count">0/1000</span>
+          <span class="key-hint">Enter to send · Shift+Enter for newline</span>
+        </div>
+      </div>
+      <button type="submit" id="send" aria-label="Submit Task">
+        <span>Execute</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
+    </form>
+  </footer>
+
+  <!-- Slide-out Task History Drawer -->
+  <aside id="historyDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <div class="drawer-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        <h3>Persistent Task History</h3>
+      </div>
+      <button type="button" class="btn-icon" id="closeHistory" aria-label="Close History">✕</button>
+    </div>
+    <div class="drawer-content">
+      <div class="drawer-actions">
+        <button type="button" class="btn-ghost small" id="refreshHistory">Refresh</button>
+      </div>
+      <ul id="historyList" class="history-list">
+        <li class="history-empty">Loading history...</li>
+      </ul>
+    </div>
+  </aside>
+  <div id="drawerOverlay" class="drawer-overlay"></div>
 
   <script src="/static/app.js"></script>
 </body>

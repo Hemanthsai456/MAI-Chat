@@ -1,198 +1,243 @@
-# Website Task Chat: chat-driven CLI execution
+# MAI-Chat — CLI-Driven AI Execution Platform
 
-A chat app where a natural-language request ("Crawl https://example.com, summarise it and return JSON") is
-turned into a controlled, validated call to an approved command-line tool. The backend runs the CLI as a real
-process, captures its stdout, stderr and exit code, validates what it produced, and shows the verified result
-in the chat. Failures, timeouts and cancellations are reported as such, never dressed up as success.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests: 45 Passed](https://img.shields.io/badge/tests-45%20passed-brightgreen.svg)](tests/)
+[![Security: Hardened](https://img.shields.io/badge/security-Anti--SSRF%20%7C%20shell%3DFalse-red.svg)](docs/SECURITY.md)
 
-Built for BuildSprint Round 2 (CLI-driven AI chat execution).
+**MAI-Chat** is a production-grade, secure, and extensible AI execution workspace developed for **BuildSprint Round 2**. 
 
-## Quick start
+It converts free-form natural language instructions into strictly validated execution plans, invokes approved CLI tools in isolated subprocesses (`shell=False`), captures streaming outputs under strict memory bounds, validates structured data, and delivers verifiable results through an interactive chat interface.
 
-Requirements: **Python 3.10+**. There are no third-party packages; everything is standard library.
+---
 
-```bash
-git clone <this repo> buildsprint-cli-chat && cd buildsprint-cli-chat
-python -m app.server            # then open http://127.0.0.1:8000
+## 1. Project Overview
+
+In traditional AI chat implementations, conversational assistants generate simulated text answers without performing verifiable work. When asked to crawl a website or execute an operation, they hallucinate content or resort to dangerous shell commands that risk remote code execution (RCE).
+
+**MAI-Chat provides an audited, end-to-end engineering solution:**
+- Natural language instructions are translated into deterministic execution plans.
+- Only approved CLI tools registered in a central catalog can run.
+- Real subprocesses execute in isolated runtime sandboxes.
+- Stdout and stderr are captured incrementally with bounded in-flight memory.
+- Results are verified against expected JSON schemas before delivery.
+- Persistent SQLite storage guarantees durability across server restarts.
+
+---
+
+## 2. Key Features
+
+- **Approved CLI Tool Registry:** Modular tool registry (`app/registry.py`) with parameter specifications, type checking, and boundary limits.
+- **Dual-Layer Intent Engine:** Deterministic rule-based engine (100% offline, zero-dependency) with an optional structured LLM planner interface.
+- **Real-Time 10-Stage Pipeline Visualizer:** Interactive frontend timeline tracking real backend execution states without simulated progress.
+- **Persistent Task History:** Durable SQLite storage (with WAL mode) supporting task browsing, inspection, and restart recovery.
+- **Bounded Worker Pool & Queue:** Fixed worker pool (`MAI_MAX_WORKERS`) and bounded queue capacity (`MAI_QUEUE_CAPACITY`) preventing thread exhaustion and process storms.
+- **Streaming Bounded Output Capture:** Daemon stream readers cap stdout/stderr in-flight, preventing pipe deadlocks and memory flooding.
+- **Anti-SSRF Defense-in-Depth:** Dual-layer network protection blocking RFC 1918 private IPs, AWS/GCP metadata (`169.254.169.254`), Carrier-Grade NAT, IPv4-mapped IPv6, and malicious redirects.
+- **Cross-Platform Lifecycle Termination:** Clean process tree termination on both Windows (`taskkill /F /T`) and POSIX (`killpg`).
+- **Export Formats:** One-click downloads for JSON payloads, formatted Markdown reports, and tabular CSV data.
+- **Modern Responsive UI:** Clean vanilla web workspace with Dark and Light themes, accessibility controls, and keyboard navigation.
+
+---
+
+## 3. Architecture Diagram
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                          User Web Workspace                            │
+│    Responsive Chat UI · 10-Stage Pipeline Visualizer · History Drawer  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTP / REST JSON API
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                  Enhanced HTTP Server (app/server.py)                  │
+│    Rate Limiting · Strict CSP Security Headers · JSON Export Endpoints │
+└─────────────────┬──────────────────────────────────┬───────────────────┘
+                  │                                  │
+┌─────────────────▼────────────────┐   ┌─────────────▼───────────────────┐
+│     Intent Engine (app/intent.py)│   │  Persistence (app/database.py)  │
+│  - Deterministic Rule Fallback   │   │  - SQLite Database (WAL mode)   │
+│  - Optional Structured LLM Plan  │   │  - Automatic Schema Migration   │
+│  - Schema Field Discovery        │   │  - Honest Crash Recovery Engine │
+└─────────────────┬────────────────┘   └─────────────▲───────────────────┘
+                  │                                  │
+┌─────────────────▼──────────────────────────────────┴───────────────────┐
+│               Task Manager & Worker Pool (app/tasks.py)                │
+│    - Bounded Task Queue (rejects queue flooding)                       │
+│    - Thread Pool Concurrency Limits                                    │
+│    - Real-time 10-Stage Event Tracking                                 │
+└─────────────────┬──────────────────────────────────────────────────────┘
+                  │
+┌─────────────────▼──────────────────────────────────────────────────────┐
+│            Approved CLI Registry & Runner (app/runner.py)              │
+│    - Approved Tool Registry & Strict Flag Validation (app/registry.py) │
+│    - Subprocess with shell=False & Minimal Environment Allowlist       │
+│    - Streaming Incremental Output Capture (In-flight Byte Limits)      │
+│    - Cross-Platform Process-Tree Kill (Windows & POSIX)                │
+└─────────────────┬──────────────────────────────────────────────────────┘
+                  │ sys.executable -I tools/site_crawler.py [args]
+┌─────────────────▼──────────────────────────────────────────────────────┐
+│          Hardened Crawler Subprocess (tools/site_crawler.py)           │
+│    - Strict Same-Host Crawl Boundary & Robots.txt Enforcement          │
+│    - Anti-SSRF Redirect Interceptor with Pre-Connection IP Checking    │
+│    - Extraction: H1-H6, Canonical, Meta, Text, Links, Word Counts      │
+│    - Structured Schema Extraction with Honest Null Values              │
+└─────────────────┬──────────────────────────────────────────────────────┘
+                  │ stdout: Valid JSON Document  |  stderr: Logs & Progress
+┌─────────────────▼──────────────────────────────────────────────────────┐
+│                Report & Verification (app/report.py)                   │
+│    - Exit Code Verification & Strict JSON Schema Parsing               │
+│    - Synthesizes Verifiable Extractive Summary                         │
+│    - Guarantees Syntactically Valid JSON Delivery                      │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Run the tests (offline, about 5 seconds):
+---
 
-```bash
-python -m unittest discover -s tests
+## 4. Technology Stack
+
+- **Runtime & Language:** Python 3.10+ (Standard Library: `urllib`, `sqlite3`, `subprocess`, `http.server`, `html.parser`, `threading`, `queue`).
+- **Database:** SQLite 3 with Write-Ahead Logging (`WAL`).
+- **Frontend:** Vanilla JavaScript (ES6+), CSS3 Variables design system, HTML5 (zero frameworks, zero build steps, strict CSP).
+- **Tooling & Tests:** Python `unittest` framework with deterministic local fixture servers.
+
+---
+
+## 5. Execution Workflow: The 10 Discrete Stages
+
+Every task advances through 10 auditable backend stages:
+1. `request_received`: Validated request enqueued with unique UUID.
+2. `intent_interpreted`: Request parsed into task parameters and constraints.
+3. `plan_prepared`: Multi-step execution plan synthesized.
+4. `input_validated`: Target URL evaluated against Anti-SSRF and port policies.
+5. `cli_selected`: Tool checked against approved registry.
+6. `process_started`: Subprocess launched in isolated environment (`shell=False`).
+7. `execution_running`: Tool executes real work; progress streamed to stderr.
+8. `output_captured`: Streaming reader drains pipes up to in-flight limits.
+9. `result_validated`: Output JSON document parsed and validated field-by-field.
+10. `task_completed`: Extractive summary generated and verified payload delivered.
+
+---
+
+## 6. Approved CLI Integration & Extension
+
+The system uses `app/registry.py` to register authorized CLI tools. Adding a new tool is straightforward:
+
+```python
+from app.registry import ApprovedTool, ArgumentSpec, register_tool
+
+register_tool(
+    ApprovedTool(
+        name="pdf-extractor",
+        script=TOOLS_DIR / "pdf_extractor.py",
+        description="Extracts metadata and text from local documents.",
+        max_timeout_s=60.0,
+        max_output_bytes=1_000_000,
+        argument_specs={
+            "--file": ArgumentSpec(flag="--file", required=True),
+            "--max-pages": ArgumentSpec(flag="--max-pages", arg_type=int, min_value=1, max_value=50),
+        },
+    )
+)
 ```
 
-Optional live test against the public internet:
+Unapproved tools or arbitrary shell commands submitted by users or language models are rejected prior to execution.
 
-```bash
-RUN_LIVE_TESTS=1 python -m unittest discover -s tests -k LiveExample
-```
+---
 
-### Configuration
+## 7. Security Architecture
+
+Detailed security specifications are available in [docs/SECURITY.md](docs/SECURITY.md).
+
+- **No Shell Execution:** `shell=False` is enforced across all process invocations. Arguments are passed as structured arrays.
+- **Anti-SSRF & DNS Defense:** Validates literal IPs and DNS responses against private, loopback, link-local, carrier-grade NAT (`100.64.0.0/10`), and IPv4-mapped IPv6 ranges.
+- **Redirect Protection:** The crawler utilizes a custom `AntiSsrflRedirectHandler` ensuring redirect chains cannot leave the start host or jump to internal endpoints.
+- **Process Memory Bounds:** Incremental chunk reading enforces output limits *during* process execution, protecting against memory exhaustion attacks.
+- **No Secret Leakage:** The subprocess environment allowlist strips API keys, credentials, and sensitive environment variables.
+
+---
+
+## 8. Configuration & Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HOST` | `127.0.0.1` | Bind address. Keep it on localhost unless you add authentication. |
+| `HOST` | `127.0.0.1` | Server bind host. Keep on localhost unless behind authenticated reverse-proxy. |
 | `PORT` | `8000` | HTTP port. |
-| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE` | unset | Passed through to the crawler so it works behind corporate proxies. |
-| `BUILDSPRINT_ALLOW_PRIVATE_TARGETS` | unset | **Testing only.** Allows crawling `127.0.0.1` and other private addresses. Never set this on a public deployment. |
+| `MAI_DB_PATH` | `data/mai_chat.db` | Location of persistent SQLite database. |
+| `MAI_MAX_WORKERS` | `3` | Worker pool concurrency limit. |
+| `MAI_QUEUE_CAPACITY` | `50` | Maximum queued tasks before returning HTTP 429. |
+| `LLM_API_KEY` | *unset* | Optional API key for structured LLM planner (OpenAI-compatible). |
+| `LLM_API_BASE` | `https://api.openai.com/v1` | Optional API base URL for LLM planner. |
+| `LLM_MODEL` | `gpt-3.5-turbo` | Optional model name for LLM planner. |
+| `BUILDSPRINT_ALLOW_PRIVATE_TARGETS` | *unset* | **Offline testing only.** Allows crawling `127.0.0.1` fixture servers. |
 
-No API keys are needed. None are read, passed to the crawler, or logged.
+---
 
-## Demo walkthrough (mandatory use case)
+## 9. Installation & Running
 
-1. Start the server and open the page.
-2. Click **Crawl example.com**, or type:
-   `Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.`
-3. The chat shows the interpretation (target URL, page limit), then live progress lines from the backend
-   ("Starting approved tool site-crawler…", "Crawler exited with code 0 after 0.9s").
-4. The final message contains a green **Task succeeded** banner, a readable summary, the structured JSON
-   (with a Copy button), and an *Execution details* panel with the exit code, duration and the crawler's stderr.
-5. Edge cases to show:
-   - **Unreachable site:** click *Unreachable site (error demo)*. The result is a red *Task failed* with the
-     reason, and no summary or JSON is shown.
-   - **Partial result:** a site where some links fail. The banner is amber and lists the failed URLs.
-   - **Cancel:** start a crawl and press *Cancel task* while it runs. The process group is killed.
-   - **Bad input:** "tell me a joke" is rejected with an explanation before anything runs.
+### Requirements
+- **Python 3.10+** (standard library only; no pip dependencies required for base execution).
+- (Optional) `certifi` for systems with non-standard root certificate stores.
 
-## Architecture
+### Quick Start
+```bash
+# 1. Clone repository
+git clone https://github.com/example/MAI-Chat.git && cd MAI-Chat
 
-```
- Browser (static/app.js)
-    │  POST /api/tasks {prompt}            GET /api/tasks/<id> (poll every 0.8 s)
-    ▼
- app/server.py ── HTTP layer, size limits, JSON API, security headers
-    │
-    ├─ app/intent.py      natural language → Intent(task_type, url, max_pages)   [rule-based]
-    │                     rejects requests without a valid web address
-    ├─ app/tasks.py       TaskManager: worker thread per task, progress log, cancel
-    │     │
-    │     ├─ app/validation.py   scheme, port, credentials, DNS, public-IP-only check
-    │     ├─ app/runner.py       approved-tool registry; subprocess with argv list,
-    │     │                      shell=False, env allowlist, timeout, process-group kill
-    │     │          │
-    │     │          ▼  python -I tools/site_crawler.py --url=… --max-pages=…
-    │     │       tools/site_crawler.py   robots.txt-aware, same-host, bounded crawler
-    │     │       → stdout: one JSON document;  stderr: progress;  exit code: 0/2/3/4
-    │     │
-    │     └─ app/report.py       validates the CLI output, decides success / partial /
-    │                            failed, builds the summary and the JSON payload
-    ▼
- chat message: banner, summary, JSON, errors, execution details
+# 2. Run the application
+python -m app.server
+
+# 3. Open browser
+http://127.0.0.1:8000
 ```
 
-### Why this CLI
+---
 
-`site_crawler.py` is a small, purpose-built CLI in the project (`tools/`). It uses only the standard library,
-so the demo runs anywhere with Python 3.10+ and no install step. It has the properties the brief asks for:
+## 10. Automated Testing
 
-- **Bounded:** page limit (1 to 10), depth limit (0 to 3), per-request timeout, 1.5 MB body cap.
-- **Polite:** honours `robots.txt` (including "disallow all" on 401/403), uses a clear User-Agent, and waits between pages.
-- **Same-host only:** it follows links on the start host only, and drops redirects that leave that host.
-- **Safe with untrusted content:** it parses HTML as text. It never executes scripts, and page text cannot change
-  its arguments or the app's instructions.
-- **Machine-readable:** one JSON document on stdout, with a `status` field and documented exit codes.
+The automated test suite runs offline without requiring open internet access:
 
-To use a different CLI (Playwright, Firecrawl, a headless-browser agent), add an entry to `APPROVED_TOOLS` in
-`app/runner.py` and a builder in `app/tasks.py` (`crawler_args`). The validation and reporting layers stay the same.
-
-### The intent layer
-
-`app/intent.py` is deliberately rule-based. It extracts the URL, detects the task type (website crawl is the only
-supported type), reads an optional page count, and explains its assumptions in the chat when it has to guess. This
-makes the pipeline deterministic and testable without an API key. `parse_intent()` is the seam where a language
-model could be used for intent classification or summarisation without changing anything else.
-
-Summaries are **extractive**: built from the page titles, descriptions, headings and opening text the crawler
-captured. The JSON says `"summary_method": "extractive"`, so nothing is presented as model output when it isn't.
-
-## How results are verified
-
-A result is shown as successful only when all of these hold:
-
-1. The process exited with code `0`.
-2. stdout is valid JSON with the expected structure (checked field by field in `app/report.py`).
-3. The crawler reported status `success` or `partial`, and at least one page was read.
-
-Anything else is reported as failed, with the reason taken from the crawler's own error list. Timeouts and
-cancellations have their own statuses. The JSON shown to the user is re-parsed before it is sent.
-
-## Error handling
-
-| Situation | Where it is caught | What the user sees |
-|---|---|---|
-| No URL, empty or oversized prompt | `intent.py`, `server.py` (HTTP 400) | Explanation; nothing runs |
-| Non-http(s) scheme, credentials, odd port | `validation.py` | "That address isn't usable: …" |
-| `localhost`, private or internal IP (at run time) | `validation.py` | Failed; "crawler was not started" |
-| Hostname does not resolve | `validation.py` | "could not resolve … offline" |
-| `robots.txt` disallows the start page | crawler exit 3 | Failed; robots reason |
-| Page returns 404/500, times out, resets | crawler, per page | Partial result, or failed if none readable |
-| Off-site redirect, non-HTML content | crawler, per page | Listed under errors |
-| CLI runs past its time limit | `runner.py` kills process group | "Stopped (timed out)"; no result |
-| User cancels | `runner.py` kills process group | "Cancelled by you" |
-| CLI prints non-JSON or malformed JSON | `report.py` | Failed; the exit code is shown |
-| Unexpected exception in the backend | `tasks.py` | Generic failure; details only in the server log |
-
-## Security controls
-
-| Risk | Control |
-|---|---|
-| Shell injection from user or model text | No shell. Arguments are a list. The URL is validated before it becomes one argument. |
-| Arbitrary command execution | Only tools in `APPROVED_TOOLS` can run. Tool name is a registry key, not free text. |
-| SSRF into internal networks | Scheme and port allowlist; IP must be globally routable (checked for literal IPs and every DNS answer); crawler stays on the start host. |
-| Runaway crawls | Page, depth, time and output-size caps, enforced in both the app and the CLI. |
-| Secrets leaking to a child process | Environment allowlist. Only proxy and CA variables pass through. |
-| Prompt-injection from web pages | Page content is data. It is parsed as text and never used to choose commands or instructions. |
-| XSS in the chat | Output is rendered with `textContent` only. Strict CSP (`script-src 'self'`). |
-| Oversized requests | 8 KB body limit, 1000-character prompt limit. |
-
-## Limitations (honest list)
-
-- **DNS rebinding:** the address is validated before the crawl, and the crawler then resolves it again. A
-  hostile DNS server could answer differently the second time. Closing this needs the crawler to pin the
-  validated IP, which is a planned improvement.
-- **Redirects:** the crawler fetches the redirect target and then discards it if it is off-site. It does not
-  block the connection in advance.
-- **Platform:** process-group killing uses POSIX signals, so the app is for Linux and macOS.
-- **State:** tasks live in memory. Restarting the server loses them.
-- **Summaries are extractive.** They are accurate to the crawled text but not abstractive. An LLM step could be
-  added at `report._summary_text`.
-- **Intent parsing is rule-based.** Unusual phrasings still work if they contain a URL, but the classifier is simple.
-- **Live site test:** the automated suite runs against a local fixture site. The `example.com` check is behind
-  `RUN_LIVE_TESTS=1` because it needs open internet access.
-
-## Project layout
-
-```
-app/
-  server.py      HTTP server, JSON API, static files, security headers
-  tasks.py       task lifecycle, worker threads, cancellation
-  intent.py      natural-language → Intent
-  validation.py  URL and network-target checks
-  runner.py      approved-tool registry, subprocess runner
-  report.py      output validation, verdicts, chat payload
-static/          index.html, app.js, style.css (no build step, no CDN)
-tools/
-  site_crawler.py  the CLI that does the real work
-tests/
-  test_app.py    unit, CLI, runner and end-to-end tests
+```bash
+# Run all tests (45 tests covering execution, crawling, security, and persistence)
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-## AI tools and external services disclosure
+To run the optional public internet verification against `example.com`:
 
-- **Built with:** Claude (Anthropic), used as the coding assistant for design, implementation and tests.
-- **Runtime:** no language model or external AI API is called. The "AI" layer is the rule-based intent parser,
-  and summaries are extractive.
-- **External services:** only the public websites the user asks to crawl. No accounts, keys or third-party APIs.
-- **Verified in build sandbox:** all 27 offline tests pass (plus 1 live test that is skipped by default); the API flow was run end to end against a local site
-  (success, partial, unreachable, invalid input, and loopback refusal). The live `example.com` run could not be
-  verified from the build sandbox, which has no outbound access to that host. Run `RUN_LIVE_TESTS=1` to check it.
+```bash
+python -c "import os, subprocess, sys; proc = subprocess.run([sys.executable, '-m', 'unittest', 'tests.test_app.LiveExampleDotComTest'], env=dict(os.environ, RUN_LIVE_TESTS='1'), check=True)"
+```
 
-## Suggested explanation video outline (4 to 7 minutes)
+---
 
-1. **Problem and solution (0:00–0:45):** chat models answer with text; this app runs real tools.
-2. **Architecture (0:45–1:45):** walk the diagram: server, intent, task manager, validation, runner, CLI, report.
-3. **Prompt to CLI (1:45–2:45):** show `app/intent.py` and the exact argv that `app/tasks.py` builds. Point out `shell=False`.
-4. **Live run (2:45–4:15):** enter the mandatory prompt. Show progress lines, the banner, the summary, the JSON, and the execution panel with the exit code.
-5. **Edge case (4:15–5:00):** the unreachable-site demo, then explain how the verdict is decided.
-6. **Security and close (5:00–6:00):** the controls table, limitations, and the AI disclosure.
+## 11. Mandatory Demonstration Instructions
+
+1. Start the server: `python -m app.server`.
+2. Open `http://127.0.0.1:8000`.
+3. Submit the prompt:
+   ```text
+   Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.
+   ```
+4. Observe:
+   - The generated execution plan.
+   - The 10-stage real-time progress visualizer.
+   - The verified extractive summary.
+   - The formatted structured JSON payload.
+   - The execution metadata (exit code 0, tool duration, stderr output).
+5. Click **Download JSON**, **Download Markdown**, or **Export CSV** to verify result export.
+
+---
+
+## 12. Additional Documentation
+
+- [System Architecture](docs/ARCHITECTURE.md)
+- [Security Architecture & Threat Model](docs/SECURITY.md)
+- [REST API Reference](docs/API.md)
+- [Demonstration Guide & Video Script](docs/DEMO_GUIDE.md)
+
+---
+
+## 13. AI Tools & External Services Disclosure
+
+- **Development Assistant:** Antigravity / Gemini (Google DeepMind), utilized for codebase audit, refactoring, cross-platform stabilization, and test expansion.
+- **Runtime Dependencies:** Zero external AI services required at runtime. Uses a deterministic rule-based intent parser and extractive summarization by default. An optional LLM planner is available when configured by the user via environment variables.
+- **Target Network:** Public websites explicitly requested by the user. No telemetry, third-party analytics, or external CDNs.

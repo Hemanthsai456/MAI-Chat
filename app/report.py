@@ -1,4 +1,4 @@
-"""Validate crawler output and turn it into the chat result.
+"""Validate crawler output and turn it into verified chat results.
 
 Rule: a result is presented as successful only when the CLI exited 0, its JSON
 parsed and matched the expected structure, and it contains at least one page.
@@ -74,6 +74,8 @@ def build_result(intent: Intent, cli: CliResult) -> dict[str, Any]:
         "duration_s": cli.duration_s,
         "timed_out": cli.timed_out,
         "cancelled": cli.cancelled,
+        "stdout_truncated": getattr(cli, "stdout_truncated", False),
+        "stderr_truncated": getattr(cli, "stderr_truncated", False),
         "stderr_tail": cli.stderr[-STDERR_TAIL_CHARS:],
     }
 
@@ -166,11 +168,12 @@ def _payload(intent: Intent, status: str, doc: dict[str, Any], execution: dict[s
     host = urllib.parse.urlsplit(intent.url).hostname or ""
     sections = _sections(pages)
     description = next((p["meta_description"] for p in pages if p["meta_description"]), "")
+    structured_data = doc.get("structured_data", {})
     return {
         "task": intent.task_type,
         "status": status,
         "input": {"url": intent.url, "max_pages": intent.max_pages},
-        "summary": _summary_text(host, pages, sections, doc["errors"]),
+        "summary": _summary_text(host, pages, sections, doc["errors"], structured_data),
         "summary_method": "extractive",
         "site": {
             "host": host,
@@ -178,6 +181,7 @@ def _payload(intent: Intent, status: str, doc: dict[str, Any], execution: dict[s
             "description": description,
             "main_sections": sections,
         },
+        "structured_data": structured_data,
         "pages": [
             {
                 "url": p["url"],
@@ -186,6 +190,9 @@ def _payload(intent: Intent, status: str, doc: dict[str, Any], execution: dict[s
                 "headings": [h["text"] for h in p["headings"]],
                 "word_count": p["word_count"],
                 "excerpt": p["excerpt"],
+                "canonical_url": p.get("canonical_url", p["url"]),
+                "internal_links_count": len(p.get("internal_links", [])),
+                "external_links_count": len(p.get("external_links", [])),
             }
             for p in pages
         ],
@@ -209,7 +216,13 @@ def _sections(pages: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def _summary_text(host: str, pages: list[dict[str, Any]], sections: list[str], errors: list[dict]) -> str:
+def _summary_text(
+    host: str,
+    pages: list[dict[str, Any]],
+    sections: list[str],
+    errors: list[dict],
+    structured_data: dict[str, Any] | None = None,
+) -> str:
     words = sum(p["word_count"] for p in pages)
     first = pages[0]
     lines = [f"Read {len(pages)} page(s) on {host} (about {words} words)."]
@@ -222,6 +235,23 @@ def _summary_text(host: str, pages: list[dict[str, Any]], sections: list[str], e
         lines.append("Main sections: " + "; ".join(sections) + ".")
     if first["excerpt"]:
         lines.append(f"Opening text: {first['excerpt']}")
+
+    if structured_data:
+        struct_lines = []
+        for key, val in structured_data.items():
+            if val is not None:
+                if isinstance(val, list):
+                    struct_lines.append(f"{key.replace('_', ' ').capitalize()}: {', '.join(str(v) for v in val)}")
+                elif isinstance(val, dict):
+                    parts = [f"{k}: {v}" for k, v in val.items()]
+                    struct_lines.append(f"{key.replace('_', ' ').capitalize()}: {', '.join(parts)}")
+                else:
+                    struct_lines.append(f"{key.replace('_', ' ').capitalize()}: {val}")
+            else:
+                struct_lines.append(f"{key.replace('_', ' ').capitalize()}: (not found on page)")
+        if struct_lines:
+            lines.append("Extracted schema fields:\n  • " + "\n  • ".join(struct_lines))
+
     if errors:
         lines.append(f"{len(errors)} page(s) could not be read; see the errors list.")
     lines.append("Summary method: extractive (built from the crawled text; no language model was used).")

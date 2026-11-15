@@ -173,7 +173,15 @@ class CrawlerCliTests(unittest.TestCase):
 
         args = [sys.executable, "-I", str(CRAWLER), f"--url={url}", "--delay=0", "--timeout=3"]
         args += [f"--{k.replace('_', '-')}={v}" for k, v in extra.items()]
-        env = {"PATH": os.environ.get("PATH", ""), "NO_PROXY": "127.0.0.1,localhost"}
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "BUILDSPRINT_ALLOW_PRIVATE_TARGETS": "1",
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", os.environ.get("SystemRoot", r"C:\Windows")),
+            "SystemRoot": os.environ.get("SystemRoot", os.environ.get("SYSTEMROOT", r"C:\Windows")),
+            "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+            "SYSTEMDRIVE": os.environ.get("SYSTEMDRIVE", "C:"),
+        }
         return subprocess.run(args, capture_output=True, text=True, timeout=60, env=env)
 
     def test_crawls_same_host_and_respects_robots(self):
@@ -355,10 +363,21 @@ class LiveExampleDotComTest(unittest.TestCase):
 def subprocess_run_crawler(url: str):
     import subprocess
 
+    env = {k: v for k, v in os.environ.items() if k in (
+        "PATH", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+        "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SYSTEMROOT", "SystemRoot", "WINDIR", "SYSTEMDRIVE",
+    )}
+    if "SSL_CERT_FILE" not in env:
+        try:
+            import certifi
+            env["SSL_CERT_FILE"] = certifi.where()
+        except ImportError:
+            pass
+
     return subprocess.run(
         [sys.executable, "-I", str(CRAWLER), f"--url={url}", "--max-pages=2", "--timeout=10"],
         capture_output=True, text=True, timeout=120,
-        env={k: v for k, v in os.environ.items() if k in ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE")},
+        env=env,
     )
 
 

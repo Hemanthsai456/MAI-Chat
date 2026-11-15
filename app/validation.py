@@ -1,4 +1,14 @@
-"""Input validation for URLs that the backend will hand to the crawler."""
+"""Input validation and SSRF defenses for target URLs.
+
+Enforces strict defense-in-depth:
+- Protocol schemes allowlist (http, https)
+- Port allowlist (80, 443)
+- No embedded credentials (user:pass@host)
+- RFC 1918 / RFC 4193 / RFC 4291 / RFC 3927 private, loopback, link-local, and carrier-grade NAT blocks
+- IPv4-mapped IPv6 normalization and validation
+- DNS resolution inspection (all resolved addresses must be globally routable)
+- Configurable test bypass switch (BUILDSPRINT_ALLOW_PRIVATE_TARGETS=1) exclusively for offline fixture testing.
+"""
 from __future__ import annotations
 
 import ipaddress
@@ -9,8 +19,17 @@ import urllib.parse
 MAX_URL_LENGTH = 2048
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 ALLOWED_PORTS = frozenset({80, 443})
-BLOCKED_HOSTS = frozenset({"localhost"})
-BLOCKED_SUFFIXES = (".localhost", ".local", ".localdomain", ".internal", ".lan")
+BLOCKED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+BLOCKED_SUFFIXES = (
+    ".localhost",
+    ".local",
+    ".localdomain",
+    ".internal",
+    ".lan",
+    ".corp",
+    ".home",
+    ".arpa",
+)
 
 
 class ValidationError(ValueError):
@@ -54,8 +73,33 @@ def normalise_url(raw: object) -> str:
     return urllib.parse.urlunsplit((parts.scheme.lower(), parts.netloc, path, parts.query, ""))
 
 
+def is_ip_globally_routable(ip_str: str) -> bool:
+    """Check if an IPv4 or IPv6 string is globally routable (not private, loopback, or reserved)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+
+    # Handle IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+
+    # Check standard attributes
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return False
+
+    # Check Carrier-Grade NAT (100.64.0.0/10)
+    if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.IPv4Network("100.64.0.0/10"):
+        return False
+
+    return ip.is_global
+
+
 def _require_global(ip: ipaddress._BaseAddress) -> None:
-    if not ip.is_global:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+
+    if not is_ip_globally_routable(str(ip)):
         raise ValidationError("the address points to a private or internal network, which is not crawled")
 
 
@@ -65,8 +109,8 @@ def validate_public_url(raw: object) -> str:
     if private_targets_allowed():
         return url
     parts = urllib.parse.urlsplit(url)
-    host = parts.hostname or ""
-    if host in BLOCKED_HOSTS or host.endswith(BLOCKED_SUFFIXES):
+    host = (parts.hostname or "").lower()
+    if host in BLOCKED_HOSTS or any(host.endswith(sfx) for sfx in BLOCKED_SUFFIXES):
         raise ValidationError("local or internal host names are not allowed")
     try:
         literal = ipaddress.ip_address(host)
@@ -83,5 +127,6 @@ def validate_public_url(raw: object) -> str:
             f"could not resolve '{host}'; the site may not exist or may be offline"
         ) from None
     for info in infos:
-        _require_global(ipaddress.ip_address(info[4][0].split("%")[0]))
+        raw_ip = info[4][0].split("%")[0]
+        _require_global(ipaddress.ip_address(raw_ip))
     return url
