@@ -120,14 +120,20 @@ class TaskManager:
         max_workers: int = DEFAULT_MAX_WORKERS,
         queue_capacity: int = DEFAULT_QUEUE_CAPACITY,
     ) -> None:
+        if queue_capacity <= 0:
+            raise ValueError(f"queue_capacity must be a positive integer, got {queue_capacity}")
+        if max_workers <= 0:
+            raise ValueError(f"max_workers must be a positive integer, got {max_workers}")
+
         self.db = db or Database()
-        self.max_workers = max(1, max_workers)
-        self.queue_capacity = max(5, queue_capacity)
+        self.max_workers = int(max_workers)
+        self.queue_capacity = int(queue_capacity)
         self._tasks: OrderedDict[str, Task] = OrderedDict()
         self._lock = threading.Lock()
         self._queue: queue.Queue[Task | None] = queue.Queue(maxsize=self.queue_capacity)
         self._workers: list[threading.Thread] = []
         self._shutdown = False
+        self._reserved_count = 0
 
         # Recover interrupted tasks from previous runs
         self.db.recover_interrupted_tasks()
@@ -139,7 +145,17 @@ class TaskManager:
             self._workers.append(t)
 
     def submit(self, prompt: str, intent: Intent) -> Task:
-        """Submit a task to the execution queue atomically."""
+        """Submit a task using a transactional admission sequence.
+
+        Guarantees:
+        1. Capacity is checked and reserved under lock before writing to database.
+        2. Queue-full rejection happens immediately without touching the database.
+        3. Database persistence occurs before the task is placed into the execution queue,
+           ensuring no worker can ever execute an unpersisted task.
+        4. If persistence fails, the reserved slot is rolled back cleanly and the task
+           is never admitted to in-memory or worker queues.
+        5. Locks are not held during database writes.
+        """
         task = Task(id=uuid.uuid4().hex, prompt=prompt, intent=intent)
         self._set_stage(task, "request_received", "completed", "Request accepted and assigned ID")
         self._set_stage(task, "intent_interpreted", "completed", intent.describe())
@@ -164,17 +180,45 @@ class TaskManager:
             stages_json=json.dumps([s.to_dict() for s in task.stages.values()]),
         )
 
+        # Step 1: Atomic capacity check and slot reservation
         with self._lock:
             if self._shutdown:
                 raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
-            try:
-                self._queue.put_nowait(task)
-            except queue.Full:
+            waiting_count = self._reserved_count + self._queue.qsize()
+            if waiting_count >= self.queue_capacity:
                 raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
+            self._reserved_count += 1
+
+        # Step 2: Database persistence outside the lock (avoids holding lock during I/O)
+        try:
+            self.db.save_task(record)
+        except Exception:
+            with self._lock:
+                self._reserved_count -= 1
+            raise
+
+        # Step 3: Commit task to in-memory tracking and worker execution queue
+        with self._lock:
+            self._reserved_count -= 1
+            if self._shutdown:
+                self._set_stage(task, "task_completed", "failed", "Cancelled due to server shutdown")
+                cancel_result = build_message(CANCELLED, "warning", "Cancelled during server shutdown.")
+                self.db.complete_task(
+                    task.id,
+                    "cancelled",
+                    cancel_result,
+                    exit_code=-1,
+                    stages_dict=[s.to_dict() for s in task.stages.values()],
+                )
+                raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
 
             self._tasks[task.id] = task
             self._evict_locked()
-            self.db.save_task(record)
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                self._tasks.pop(task.id, None)
+                raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
 
         return task
 

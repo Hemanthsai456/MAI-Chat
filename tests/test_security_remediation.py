@@ -51,6 +51,8 @@ from tools.site_crawler import (
     EXIT_BLOCKED,
     EXIT_FAILED,
     EXIT_OK,
+    PinnedHTTPConnection,
+    PinnedHTTPSConnection,
     SecurityError,
     crawl,
     load_robots,
@@ -59,6 +61,22 @@ from tools.site_crawler import (
 )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+class _MockSocket:
+    """Mock socket for connection-layer DNS rebinding and peer verification testing."""
+    def __init__(self, peer_ip: str, peer_port: int) -> None:
+        self._peer = (peer_ip, peer_port)
+        self.closed = False
+
+    def getpeername(self) -> tuple[str, int]:
+        return self._peer
+
+    def close(self) -> None:
+        self.closed = True
+
+    def settimeout(self, t: float | None) -> None:
+        pass
 
 
 class SecurityRemediationTests(unittest.TestCase):
@@ -75,27 +93,133 @@ class SecurityRemediationTests(unittest.TestCase):
         os.environ.pop("BUILDSPRINT_ALLOW_PRIVATE_TARGETS", None)
 
     # -----------------------------------------------------------------------
-    # Scenario 1: DNS Rebinding Prevention at Connection Layer
+    # Scenario 1: Genuine Connection-Layer DNS Rebinding Test
     # -----------------------------------------------------------------------
-    def test_01_dns_rebinding_connection_layer_blocks_private_ip(self):
-        """Simulate DNS returning private IP on resolution: destination validator blocks it."""
+    def test_01_dns_rebinding_connection_layer_simulated_change(self):
+        """Genuine connection-layer DNS rebinding test.
+
+        Validates:
+        1. Hostname resolves initially to a validated public IP (93.184.216.34).
+        2. Connection pins this exact IP for destination selection.
+        3. Subsequent DNS resolution changes to a private IP (127.0.0.1 or 10.0.0.1).
+        4. Verifies socket connection connects to the pinned public IP, never the private IP.
+        5. Verifies hostname is resolved only once for the connection's destination selection.
+        6. Verifies peer-address check rejects connections if peer is private.
+        7. Tests both PinnedHTTPConnection and PinnedHTTPSConnection paths.
+        """
         orig_getaddrinfo = socket.getaddrinfo
+        orig_create_conn = socket.create_connection
 
-        # Hook getaddrinfo to return a private IP for a public-looking hostname
-        def mock_getaddrinfo(host, port, *args, **kwargs):
-            if host == "rebind-test.example.com":
-                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.100", port))]
-            return orig_getaddrinfo(host, port, *args, **kwargs)
-
-        socket.getaddrinfo = mock_getaddrinfo
+        os.environ["BUILDSPRINT_ALLOW_PRIVATE_TARGETS"] = "0"
         try:
-            # When testing bypass is disabled, resolve_and_validate_destination must reject
-            os.environ["BUILDSPRINT_ALLOW_PRIVATE_TARGETS"] = "0"
+            # --- Part A: PinnedHTTPConnection ---
+            http_dns_calls: list[int] = []
+            http_conn_targets: list[tuple[str, int]] = []
+
+            def mock_http_dns(host, port, *args, **kwargs):
+                if host == "rebind-http.example.com":
+                    http_dns_calls.append(len(http_dns_calls) + 1)
+                    if len(http_dns_calls) == 1:
+                        # 1st call: returns valid public IP
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+                    else:
+                        # Subsequent call: attacker changes DNS to loopback/private
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+                return orig_getaddrinfo(host, port, *args, **kwargs)
+
+            def mock_create_http(addr, timeout=None, source_address=None):
+                http_conn_targets.append(addr)
+                target_ip, target_port = addr
+                return _MockSocket(target_ip, target_port)
+
+            socket.getaddrinfo = mock_http_dns
+            socket.create_connection = mock_create_http
+
+            conn_http = PinnedHTTPConnection("rebind-http.example.com", port=80)
+            conn_http.connect()
+
+            # Verify connection used the pinned public IP, NOT the changed private IP
+            self.assertEqual(conn_http.pinned_ip, "93.184.216.34")
+            self.assertEqual(http_conn_targets, [("93.184.216.34", 80)])
+            # Verify hostname was resolved only once for destination selection
+            self.assertEqual(len(http_dns_calls), 1)
+
+            # Verify subsequent DNS query indeed changes to private IP
+            changed_res = socket.getaddrinfo("rebind-http.example.com", 80)
+            self.assertEqual(changed_res[0][4][0], "127.0.0.1")
+            self.assertEqual(len(http_dns_calls), 2)
+            # But the connection's target socket was never affected
+            self.assertEqual(http_conn_targets, [("93.184.216.34", 80)])
+
+            # Verify peer address check on HTTP: if peer IP is private, SecurityError is raised
+            def mock_create_bad_peer(addr, timeout=None, source_address=None):
+                return _MockSocket("192.168.1.1", 80)
+
+            socket.create_connection = mock_create_bad_peer
+            conn_bad_peer = PinnedHTTPConnection("rebind-http.example.com", port=80)
+            http_dns_calls.clear()
             with self.assertRaises(SecurityError) as ctx:
-                resolve_and_validate_destination("rebind-test.example.com", 80)
-            self.assertIn("private", str(ctx.exception).lower())
+                conn_bad_peer.connect()
+            self.assertIn("not globally routable", str(ctx.exception).lower())
+
+            # --- Part B: PinnedHTTPSConnection ---
+            https_dns_calls: list[int] = []
+            https_conn_targets: list[tuple[str, int]] = []
+            ssl_wrapped_hostnames: list[str | None] = []
+
+            def mock_https_dns(host, port, *args, **kwargs):
+                if host == "rebind-https.example.com":
+                    https_dns_calls.append(len(https_dns_calls) + 1)
+                    if len(https_dns_calls) == 1:
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+                    else:
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", port))]
+                return orig_getaddrinfo(host, port, *args, **kwargs)
+
+            def mock_create_https(addr, timeout=None, source_address=None):
+                https_conn_targets.append(addr)
+                target_ip, target_port = addr
+                return _MockSocket(target_ip, target_port)
+
+            socket.getaddrinfo = mock_https_dns
+            socket.create_connection = mock_create_https
+
+            import ssl
+            orig_wrap = ssl.SSLContext.wrap_socket
+
+            def mock_wrap(self_ssl, sock, server_hostname=None, *w_args, **w_kwargs):
+                ssl_wrapped_hostnames.append(server_hostname)
+                return sock
+
+            ssl.SSLContext.wrap_socket = mock_wrap
+            try:
+                conn_https = PinnedHTTPSConnection("rebind-https.example.com", port=443)
+                conn_https.connect()
+
+                # Verify HTTPS connection targeted the pinned public IP
+                self.assertEqual(conn_https.pinned_ip, "93.184.216.34")
+                self.assertEqual(https_conn_targets, [("93.184.216.34", 443)])
+                # Verify DNS resolved once for destination selection
+                self.assertEqual(len(https_dns_calls), 1)
+                # Verify TLS SNI preserved original hostname, not IP
+                self.assertEqual(ssl_wrapped_hostnames, ["rebind-https.example.com"])
+
+                # Verify HTTPS peer check
+                def mock_create_bad_https_peer(addr, timeout=None, source_address=None):
+                    return _MockSocket("10.0.0.1", 443)
+
+                socket.create_connection = mock_create_bad_https_peer
+                https_dns_calls.clear()
+                conn_bad_https = PinnedHTTPSConnection("rebind-https.example.com", port=443)
+                with self.assertRaises(SecurityError) as ctx:
+                    conn_bad_https.connect()
+                self.assertIn("not globally routable", str(ctx.exception).lower())
+            finally:
+                ssl.SSLContext.wrap_socket = orig_wrap
+
         finally:
             socket.getaddrinfo = orig_getaddrinfo
+            socket.create_connection = orig_create_conn
             os.environ["BUILDSPRINT_ALLOW_PRIVATE_TARGETS"] = "1"
 
     # -----------------------------------------------------------------------
@@ -536,6 +660,179 @@ class SecurityRemediationTests(unittest.TestCase):
                 os.remove(temp_db_path)
             except Exception:
                 pass
+
+    # -----------------------------------------------------------------------
+    # Scenario 19: Queue Capacity Configuration (1, 2, Default, and Validation)
+    # -----------------------------------------------------------------------
+    def test_19_queue_capacity_configuration(self):
+        """Respects configured positive queue capacities (1, 2, default) and rejects <= 0."""
+        # 1. Capacity <= 0 must raise ValueError
+        with self.assertRaises(ValueError):
+            TaskManager(db=Database(":memory:"), queue_capacity=0)
+
+        with self.assertRaises(ValueError):
+            TaskManager(db=Database(":memory:"), queue_capacity=-5)
+
+        with self.assertRaises(ValueError):
+            TaskManager(db=Database(":memory:"), max_workers=0)
+
+        with self.assertRaises(ValueError):
+            TaskManager(db=Database(":memory:"), max_workers=-1)
+
+        # 2. Default capacity
+        mgr_default = TaskManager(db=Database(":memory:"))
+        self.assertEqual(mgr_default.queue_capacity, 50)
+        mgr_default.shutdown(timeout=1.0)
+
+        # 3. Capacity = 1: accepts 1 waiting task, rejects the 2nd with QueueFullError
+        mgr_1 = TaskManager(db=Database(":memory:"), max_workers=1, queue_capacity=1)
+        intent = Intent(task_type="crawl_and_extract", url="https://example.com", max_pages=1)
+
+        # Block the 1 worker with a running task so subsequent task must wait in queue
+        worker_busy = threading.Event()
+        worker_can_finish = threading.Event()
+
+        orig_execute = mgr_1._execute
+        def blocking_execute(task):
+            worker_busy.set()
+            worker_can_finish.wait(timeout=5.0)
+
+        mgr_1._execute = blocking_execute
+
+        t_running = mgr_1.submit("Running task", intent)
+        self.assertTrue(worker_busy.wait(timeout=2.0))
+
+        # Now worker is busy. Queue capacity is 1. Submit waiting task #1 (should succeed)
+        t_waiting = mgr_1.submit("Waiting task 1", intent)
+        self.assertEqual(mgr_1._queue.qsize(), 1)
+
+        # Submit waiting task #2: MUST be rejected because capacity is 1
+        with self.assertRaises(QueueFullError):
+            mgr_1.submit("Waiting task 2 (overflow)", intent)
+
+        # Release worker and clean up
+        worker_can_finish.set()
+        mgr_1.shutdown(timeout=2.0)
+
+        # 4. Capacity = 2: accepts 2 waiting tasks, rejects 3rd
+        mgr_2 = TaskManager(db=Database(":memory:"), max_workers=1, queue_capacity=2)
+        worker_busy_2 = threading.Event()
+        worker_can_finish_2 = threading.Event()
+
+        def blocking_execute_2(task):
+            worker_busy_2.set()
+            worker_can_finish_2.wait(timeout=5.0)
+
+        mgr_2._execute = blocking_execute_2
+
+        mgr_2.submit("Running task", intent)
+        self.assertTrue(worker_busy_2.wait(timeout=2.0))
+
+        mgr_2.submit("Waiting task 1", intent)
+        mgr_2.submit("Waiting task 2", intent)
+        self.assertEqual(mgr_2._queue.qsize(), 2)
+
+        # 3rd waiting task must be rejected
+        with self.assertRaises(QueueFullError):
+            mgr_2.submit("Waiting task 3 (overflow)", intent)
+
+        worker_can_finish_2.set()
+        mgr_2.shutdown(timeout=2.0)
+
+    # -----------------------------------------------------------------------
+    # Scenario 20: Transactional Admission — Failed Persistence Cannot Execute
+    # -----------------------------------------------------------------------
+    def test_20_transactional_admission_failed_persistence_cannot_execute(self):
+        """If save_task() fails, task is never placed in queue and no worker executes it."""
+        import sqlite3
+        db = Database(":memory:")
+        mgr = TaskManager(db=db, max_workers=2, queue_capacity=5)
+
+        # Track any task execution by workers
+        executed_tasks: list[str] = []
+        orig_execute = mgr._execute
+        def tracked_execute(task):
+            executed_tasks.append(task.id)
+            orig_execute(task)
+        mgr._execute = tracked_execute
+
+        # Monkeypatch save_task to simulate database persistence failure
+        def failing_save_task(record):
+            raise sqlite3.OperationalError("Simulated database disk failure during save_task")
+
+        db.save_task = failing_save_task
+
+        intent = Intent(task_type="crawl_and_extract", url="https://example.com", max_pages=1)
+        with self.assertRaises(sqlite3.OperationalError):
+            mgr.submit("Task that will fail persistence", intent)
+
+        # Allow worker threads time to potentially pick up any errant tasks
+        time.sleep(0.5)
+
+        # 1. No worker must have executed this task
+        self.assertEqual(executed_tasks, [])
+
+        # 2. Task must not be in in-memory tasks
+        self.assertEqual(len(mgr._tasks), 0)
+
+        # 3. Task must not be sitting in the queue
+        self.assertEqual(mgr._queue.qsize(), 0)
+
+        # 4. Reserved count must have been rolled back cleanly
+        self.assertEqual(mgr._reserved_count, 0)
+
+        # Restore working save_task and verify system operates normally without slot leaks
+        del db.save_task
+        valid_task = mgr.submit("Valid subsequent task", intent)
+        self.assertIsNotNone(valid_task)
+        self.assertIn(valid_task.id, mgr._tasks)
+
+        mgr.shutdown(timeout=2.0)
+
+    # -----------------------------------------------------------------------
+    # Scenario 21: Queue-Full Rejection Creates No Database Record
+    # -----------------------------------------------------------------------
+    def test_21_queue_full_creates_no_database_record(self):
+        """When a task is rejected due to queue capacity, no database record is created."""
+        db = Database(":memory:")
+        mgr = TaskManager(db=db, max_workers=1, queue_capacity=1)
+
+        worker_busy = threading.Event()
+        worker_can_finish = threading.Event()
+
+        def blocking_execute(task):
+            worker_busy.set()
+            worker_can_finish.wait(timeout=5.0)
+
+        mgr._execute = blocking_execute
+        intent = Intent(task_type="crawl_and_extract", url="https://example.com", max_pages=1)
+
+        # Task 1 occupies worker
+        t1 = mgr.submit("Task 1 (running)", intent)
+        self.assertTrue(worker_busy.wait(timeout=2.0))
+
+        # Task 2 fills the 1 waiting slot
+        t2 = mgr.submit("Task 2 (waiting)", intent)
+
+        # Count records currently in database
+        initial_db_tasks = mgr.list_history()
+        initial_ids = {t["id"] for t in initial_db_tasks}
+        self.assertIn(t1.id, initial_ids)
+        self.assertIn(t2.id, initial_ids)
+        self.assertEqual(len(initial_db_tasks), 2)
+
+        # Task 3 should be rejected with QueueFullError
+        with self.assertRaises(QueueFullError):
+            mgr.submit("Task 3 (rejected)", intent)
+
+        # Verify no record was created in the database for Task 3
+        post_db_tasks = mgr.list_history()
+        self.assertEqual(len(post_db_tasks), 2)
+        post_ids = {t["id"] for t in post_db_tasks}
+        self.assertEqual(initial_ids, post_ids)
+
+        worker_can_finish.set()
+        mgr.shutdown(timeout=2.0)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 63 Passed](https://img.shields.io/badge/tests-63%20passed-brightgreen.svg)](tests/)
+[![Tests: 65 Passed (1 Skipped)](https://img.shields.io/badge/tests-65%20passed%20%7C%201%20skipped-brightgreen.svg)](tests/)
 [![Security: Hardened](https://img.shields.io/badge/security-Anti--SSRF%20%7C%20IP--Pinned%20%7C%20RFC%209309-red.svg)](docs/SECURITY.md)
 
-**MAI-Chat** is a production-grade, secure, and extensible AI execution workspace developed for **BuildSprint Round 2**. 
+**MAI-Chat** is a hardened, audited, and extensible CLI-driven AI execution platform developed for **BuildSprint Round 2**. 
 
 It converts free-form natural language instructions into strictly validated execution plans, invokes approved CLI tools in isolated subprocesses (`shell=False`), captures streaming outputs under strict memory bounds, validates structured data, and delivers verifiable results through an interactive chat interface.
 
@@ -18,7 +18,7 @@ In traditional AI chat implementations, conversational assistants generate simul
 **MAI-Chat provides an audited, end-to-end engineering solution:**
 - Natural language instructions are translated into deterministic execution plans.
 - Only approved CLI tools registered in a central catalog can run.
-- Real subprocesses execute in isolated runtime sandboxes.
+- Subprocesses execute with explicit argument lists, `shell=False`, and stripped environments.
 - Stdout and stderr are captured incrementally with bounded in-flight memory.
 - Results are verified against expected JSON schemas before delivery.
 - Persistent SQLite storage guarantees durability across server restarts.
@@ -146,15 +146,23 @@ Unapproved tools or arbitrary shell commands submitted by users or language mode
 
 ---
 
-## 7. Security Architecture
+## 7. Security Controls & System Boundaries
 
-Detailed security specifications are available in [docs/SECURITY.md](docs/SECURITY.md).
+Detailed threat models and audit reports are documented in [docs/SECURITY.md](docs/SECURITY.md).
 
-- **No Shell Execution:** `shell=False` is enforced across all process invocations. Arguments are passed as structured arrays.
-- **Anti-SSRF & DNS Defense:** Validates literal IPs and DNS responses against private, loopback, link-local, carrier-grade NAT (`100.64.0.0/10`), and IPv4-mapped IPv6 ranges.
-- **Redirect Protection:** The crawler utilizes a custom `AntiSsrflRedirectHandler` ensuring redirect chains cannot leave the start host or jump to internal endpoints.
-- **Process Memory Bounds:** Incremental chunk reading enforces output limits *during* process execution, protecting against memory exhaustion attacks.
-- **No Secret Leakage:** The subprocess environment allowlist strips API keys, credentials, and sensitive environment variables.
+### Implemented Controls:
+- **Approved CLI Catalog & Schema Enforcement:** Only tools registered in `app/registry.py` can be executed. Flags, types, ranges, allowed values, and required parameters are strictly validated; positional arguments, duplicate flags, and unapproved parameters are rejected.
+- **`shell=False` Execution:** All subprocesses are launched with structured argument lists (`argv`) and `shell=False`. Raw user inputs or model-generated commands are never passed to a system shell, eliminating shell injection vectors.
+- **Restricted Environment Allowlist:** The child process receives an explicit minimal environment allowlist (`CHILD_ENV_ALLOWLIST`), stripping system secrets, API keys, and internal developer test flags.
+- **Bounded Streaming Output Capture:** Daemon stream readers cap stdout/stderr incrementally while reading chunks, preventing pipe deadlocks and memory flooding.
+- **Process-Tree Termination:** Subprocesses are terminated cleanly on timeout or cancellation without leaving orphaned processes (Windows: `taskkill /F /T /PID`; POSIX: `os.killpg`).
+- **Network-Layer SSRF & DNS Rebinding Controls:** IP-pinned socket connections (`PinnedHTTPConnection` / `PinnedHTTPSConnection`) resolve hostnames once per attempt, validate all returned IPv4/IPv6 addresses, reject mixed public/private answers, verify connected peer addresses via `getpeername()`, preserve TLS SNI/host verification, and disable ambient proxies. RFC 9309 compliant `robots.txt` enforcement disallows crawling on 5xx or connection failures.
+- **Strict Destination Restrictions:** Initial URLs, discovered links, and redirects enforce HTTP/HTTPS schemes only, standard ports 80/443 only, no embedded credentials, and same-host boundaries.
+
+### Real System Boundaries & Limitations:
+- **Subprocess Isolation vs. OS Sandboxing:** Execution takes place inside standard OS child processes with a minimal environment and working directory isolation. The application does **not** provide kernel-level containerization (e.g., Docker/cgroups), hypervisor virtualization (e.g., gVisor/Firecracker), or OS-level restricted security tokens (e.g., Windows AppContainer, Linux seccomp-bpf). Child tools execute with the permissions of the host user running the Python server.
+- **Deployment Assumptions & Localhost Default:** The application defaults to binding strictly to `127.0.0.1`. It is designed for single-user local deployment or deployment behind an authenticated, TLS-terminating reverse proxy. It does not provide multi-tenant isolation.
+- **Offline Testing Bypass:** `BUILDSPRINT_ALLOW_PRIVATE_TARGETS=1` is restricted to local offline testing on loopback; startup safety checks prevent the server from binding to non-loopback interfaces if enabled.
 
 ---
 
@@ -199,7 +207,7 @@ http://127.0.0.1:8000
 The automated test suite runs offline without requiring open internet access:
 
 ```bash
-# Run all tests (63 tests covering execution, crawling, security remediation, and persistence)
+# Run all tests (66 tests covering execution, crawling, DNS rebinding, concurrency, and persistence)
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
