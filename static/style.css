@@ -1,0 +1,94 @@
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1d2330;
+  --muted: #5b6475;
+  --accent: #2b6cb0;
+  --ok-bg: #e6f6ec;  --ok-fg: #1d6b3a;
+  --warn-bg: #fff4dc; --warn-fg: #7a5300;
+  --err-bg: #fde8e8;  --err-fg: #9b1c1c;
+  --code-bg: #0f1420; --code-fg: #e6edf7;
+  --border: #dde1e8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1218; --card: #171b24; --text: #e7ebf2; --muted: #9aa4b5;
+    --accent: #7aa7e0; --border: #2a3140;
+    --ok-bg: #163524; --ok-fg: #9ee0b5; --warn-bg: #3a2e10; --warn-fg: #f3d58a;
+    --err-bg: #3a1717; --err-fg: #ffb4b4;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1218; --card: #171b24; --text: #e7ebf2; --muted: #9aa4b5;
+  --accent: #7aa7e0; --border: #2a3140;
+  --ok-bg: #163524; --ok-fg: #9ee0b5; --warn-bg: #3a2e10; --warn-fg: #f3d58a;
+  --err-bg: #3a1717; --err-fg: #ffb4b4;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding-bottom: 150px;
+}
+.top { max-width: 760px; margin: 0 auto; padding: 24px 16px 8px; }
+.top h1 { margin: 0 0 4px; font-size: 1.4rem; }
+.sub { margin: 0; color: var(--muted); font-size: .9rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+
+#chat { max-width: 760px; margin: 0 auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 14px; }
+.msg { display: flex; }
+.msg.user { justify-content: flex-end; }
+.bubble {
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  padding: 12px 14px; max-width: 100%; width: 100%; overflow-wrap: anywhere;
+}
+.msg.user .bubble { background: var(--accent); color: #fff; border-color: transparent; width: auto; max-width: 88%; }
+.bubble h3 { font-size: .95rem; margin: 14px 0 6px; }
+.bubble p { margin: .3em 0; }
+.muted { color: var(--muted); font-size: .9rem; }
+.status { font-weight: 600; }
+
+.banner { border-radius: 10px; padding: 8px 10px; font-weight: 500; margin: 6px 0; }
+.banner.success { background: var(--ok-bg); color: var(--ok-fg); }
+.banner.warning { background: var(--warn-bg); color: var(--warn-fg); }
+.banner.error { background: var(--err-bg); color: var(--err-fg); }
+
+.prose { white-space: pre-wrap; font-size: .92rem; }
+.code-wrap { position: relative; }
+pre.code {
+  background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 12px;
+  overflow: auto; max-height: 360px; font-size: .8rem; margin: 6px 0; white-space: pre;
+}
+.errors { padding-left: 18px; font-size: .9rem; overflow-wrap: anywhere; }
+.log, .progress { font-size: .85rem; color: var(--muted); padding-left: 20px; }
+
+button { font: inherit; cursor: pointer; border-radius: 8px; }
+button:disabled { opacity: .6; cursor: default; }
+.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); padding: 4px 10px; margin: 6px 6px 0 0; }
+.ghost.small { font-size: .8rem; }
+.code-wrap .ghost { position: relative; }
+.chip { background: var(--bg); color: var(--accent); border: 1px solid var(--border); padding: 6px 10px; margin: 4px 6px 0 0; font-size: .85rem; }
+.examples { display: flex; flex-wrap: wrap; }
+details.exec { margin-top: 10px; font-size: .9rem; }
+details.exec summary { cursor: pointer; color: var(--muted); }
+
+#composer {
+  position: fixed; left: 0; right: 0; bottom: 0; background: var(--card);
+  border-top: 1px solid var(--border); padding: 10px 16px; display: flex; gap: 8px;
+  max-width: 760px; margin: 0 auto;
+}
+#prompt {
+  flex: 1; resize: vertical; min-height: 44px; max-height: 160px; font: inherit;
+  border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+  background: var(--bg); color: var(--text);
+}
+#send {
+  background: var(--accent); color: #fff; border: 0; padding: 0 18px; border-radius: 10px; font-weight: 600;
+}
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+@media (max-width: 480px) {
+  .msg.user .bubble { max-width: 96%; }
+  #composer { padding: 8px 12px; }
+}

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Website Task Chat</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Website Task Chat</h1>
+    <p class="sub">Each request starts a real <code>site-crawler</code> process on the server. Results come from its captured output.</p>
+  </header>
+
+  <main id="chat" aria-live="polite">
+    <div class="msg bot">
+      <div class="bubble">
+        <p>Give me a website and a task. For example:</p>
+        <div class="examples">
+          <button type="button" class="chip" data-prompt="Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.">Crawl example.com</button>
+          <button type="button" class="chip" data-prompt="Crawl https://example.com up to 2 pages and summarise it.">Up to 2 pages</button>
+          <button type="button" class="chip" data-prompt="Summarise https://this-domain-does-not-exist-buildsprint.com">Unreachable site (error demo)</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <form id="composer" autocomplete="off">
+    <label class="visually-hidden" for="prompt">Task</label>
+    <textarea id="prompt" rows="2" maxlength="1000" placeholder="Crawl https://example.com, summarise it and return JSON."></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
