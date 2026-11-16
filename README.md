@@ -2,7 +2,6 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 77 Passed (1 Skipped)](https://img.shields.io/badge/tests-77%20passed%20%7C%201%20skipped-brightgreen.svg)](tests/)
 [![Security: Hardened](https://img.shields.io/badge/security-Anti--SSRF%20%7C%20IP--Pinned%20%7C%20RFC%209309-red.svg)](docs/SECURITY.md)
 
 **MAI-Chat** is a hardened, audited, and extensible CLI-driven AI execution platform developed for **BuildSprint Round 2**. 
@@ -28,7 +27,7 @@ In traditional AI chat implementations, conversational assistants generate simul
 ## 2. Key Features
 
 - **Approved CLI Tool Registry:** Modular tool registry (`app/registry.py`) with parameter specifications, type checking, boundary limits, and strict schema validation.
-- **Evidence-Grounded Website Intelligence:** Post-crawl intelligence engine (`app/intelligence.py`) delivering structured, verifiable natural-language answers, website overviews, grounded entity analysis (organizations, products, services, technologies), contextual findings, and transparent confidence citations (`supported`, `partially supported`, `not found in the crawled content`) without numeric hallucinated probabilities.
+- **Evidence-Grounded Website Intelligence:** Post-crawl intelligence engine (`app/intelligence.py`) delivering structured natural-language answers, website overviews, heuristic entity candidates, contextual findings, and evidence references checked against crawled page text (`supported`, `partially supported`, `not found in the crawled content`) without numeric hallucinated probabilities.
 - **Dual-Layer Intent Engine:** Deterministic rule-based engine (100% offline, zero-dependency) with an optional structured LLM planner interface.
 - **Real-Time 10-Stage Pipeline Visualizer:** Interactive frontend timeline tracking real backend execution states without simulated progress.
 - **Persistent Task History:** Durable SQLite storage (with WAL mode) supporting task browsing, inspection, versioned migrations, and restart recovery.
@@ -97,7 +96,7 @@ In traditional AI chat implementations, conversational assistants generate simul
 │      Evidence-Grounded Intelligence Engine (app/intelligence.py)       │
 │    - Operates Strictly AFTER Crawler Output & Schema Verification      │
 │    - Zero Shell/Execution Capabilities (Pure Interpretation)           │
-│    - Prompt Injection Resistance (Untrusted Data Isolation)           │
+│    - Untrusted Evidence Delimiters & Output Grounding Checks          │
 │    - Grounded Direct Answer, Website Overview, & Entity Analysis       │
 │    - Contextual Findings, Limitations, & Transparent Evidence Labels   │
 │    - Reuses Optional LLM API with Bounded 10s Timeout & Deterministic  │
@@ -160,14 +159,14 @@ Unapproved tools or arbitrary shell commands submitted by users or language mode
 
 ## 7. Evidence-Grounded Website Intelligence
 
-Following successful CLI tool execution and JSON validation, MAI-Chat runs an evidence-grounded intelligence layer (`app/intelligence.py`) that interprets the validated crawler findings in the context of the user's original query.
+After crawler output is parsed, MAI-Chat runs an intelligence layer (`app/intelligence.py`) over any retrieved pages, including partial results. The crawler itself has no dependency on LLM reasoning.
 
 ### Architectural Guarantees:
 - **Strict Separation of Concerns:** LLM or NLP reasoning is never placed inside the crawler subprocess. The crawler remains a fast, deterministic CLI tool.
-- **Untrusted Data Isolation:** All crawled HTML, excerpts, and headings are treated strictly as passive, untrusted third-party data. Prompt injection attempts embedded in crawled pages cannot execute commands, invoke CLI tools, or modify pipeline state.
+- **Untrusted Data Handling:** Crawled content is placed in an explicitly untrusted evidence section in the LLM prompt. The intelligence component has no shell or CLI execution interface. Prompt delimiters are a mitigation, not a guarantee that every model will resist prompt injection.
 - **Pure Offline Deterministic Mode:** If no LLM credentials (`LLM_API_KEY`) are configured, the engine performs deterministic evidence extraction, deriving entities, categories, contextual relevance, and citations with zero external calls.
-- **Optional LLM Synthesis with Bounded Fallback:** When configured, calls an OpenAI-compatible completion API with a 10.0-second timeout, 32KB response limit, and schema validation. If the LLM provider fails, times out, or returns invalid schema, the system gracefully falls back to deterministic analysis—**a successful crawl is never failed due to intelligence synthesis**.
-- **Transparent Confidence Labels:** Every substantive claim is cited with clear, honest confidence levels:
+- **Optional LLM Synthesis with Bounded Fallback:** When configured, calls an OpenAI-compatible completion API with a 10.0-second timeout, 32KB response limit, schema validation, and conservative checks for known page URLs, exact supporting quotes, answer-term overlap, and entity names. Responses that fail these checks fall back to deterministic analysis. These lexical checks do not prove semantic entailment.
+- **Transparent Evidence Labels:** Evidence entries use the following labels (these are not calibrated probabilities):
   - `"supported"`: Explicitly verified in crawled excerpts.
   - `"partially supported"`: Related terms found, but incomplete coverage.
   - `"not found in the crawled content"`: Honest disclosure of missing evidence.
@@ -176,8 +175,8 @@ Following successful CLI tool execution and JSON validation, MAI-Chat runs an ev
 ### Structured Intelligence Response Sections:
 1. **Direct Answer:** Directly addresses the user's specific prompt rather than simply repeating an extractive summary.
 2. **Website Overview:** Explains what the site represents, its primary purpose, content categories, and relevance status (`relevant`, `partially_relevant`, `not_relevant`).
-3. **Relevant Entities:** Identifies grounded entities (Organization, Product, Service, Technology, Person, Location, Event) with descriptions, relevance, and source URLs.
-4. **Contextual Findings:** Explains key discoveries, entity relationships, question answers, crawl limitations, and unsupported conclusions.
+3. **Entity Candidates:** Reports names and categories derived from crawler metadata, structured fields, and a small technology keyword list. This is heuristic extraction, not comprehensive named-entity recognition.
+4. **Contextual Findings:** Reports crawl-derived observations, relevance, crawl limitations, and unsupported conclusions. Relationships are left empty unless explicitly supported; co-occurrence alone is not a relationship.
 5. **Evidence & Limitations:** Verifiable citations with supporting quotes and transparent confidence tags.
 
 ---
@@ -243,7 +242,7 @@ http://127.0.0.1:8000
 The automated test suite runs offline without requiring open internet access:
 
 ```bash
-# Run all tests (66 tests covering execution, crawling, DNS rebinding, concurrency, and persistence)
+# Run all tests (the exact count depends on the current test suite)
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
