@@ -510,7 +510,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | None
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
     httpd = create_server(host, port)
     log.info("MAI-Chat CLI Execution Engine running at http://%s:%s", host, port)

@@ -1,0 +1,4 @@
+# MAI-Chat — Pure Python Standard Library
+# Zero mandatory third-party pip dependencies are required.
+# Optional certifi package ensures standard TLS root certificates across all cloud OS distributions.
+certifi>=2024.2.2
