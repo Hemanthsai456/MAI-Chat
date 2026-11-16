@@ -10,7 +10,7 @@ Covers:
   7. Missing LLM configuration (pure offline deterministic fallback);
   8. LLM timeout and provider failure fallback (crawler data preserved);
   9. Malformed LLM response fallback;
-  10. Prompt injection resistance (crawled HTML treated strictly as untrusted passive data);
+  10. Prompt construction and safe fallback for adversarial crawled text;
   11. Secret isolation (no API keys or environment secrets leaked);
   12. Output schema compatibility: JSON, Markdown, and CSV exports remain valid.
 """
@@ -33,6 +33,7 @@ from app.intelligence import (
     CONF_NOT_FOUND,
     CONF_PARTIAL,
     CONF_SUPPORTED,
+    _validate_llm_grounding,
     VALID_CONFIDENCE_LABELS,
     VALID_ENTITY_TYPES,
     generate_intelligence,
@@ -315,8 +316,11 @@ class IntelligenceTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", side_effect=mock_urlopen):
             intel_llm = generate_intelligence("What is this blog about?", malicious_doc)
 
-        self.assertEqual(intel_llm["generator"], "llm")
-        # Verify that prompt isolates content in <crawled_evidence> and labels it UNTRUSTED DATA
+        # The mocked model response includes an unverifiable short quote, so
+        # grounding validation must reject it and use the deterministic fallback.
+        self.assertEqual(intel_llm["generator"], "deterministic")
+        # This test verifies prompt construction and evidence rejection, not
+        # that a live third-party model is immune to every prompt injection.
         sys_msg = recorded_payload["messages"][0]["content"]
         user_msg = recorded_payload["messages"][1]["content"]
         self.assertIn("UNTRUSTED DATA", sys_msg)
@@ -410,6 +414,63 @@ class IntelligenceTests(unittest.TestCase):
             self.assertEqual(rows[1][1], "Example Domain")
         finally:
             mgr.shutdown()
+
+
+    # 13. LLM grounding rejects fabricated citations, quotes, and entities
+    def test_13_llm_grounding_rejects_fabricated_evidence(self):
+        valid = {
+            "direct_answer": "Example Domain is used for illustrative examples in documents.",
+            "website_overview": {
+                "represents": "Example Domain",
+                "purpose": "Illustrative examples in documents",
+                "categories": ["Documentation"],
+                "relevance": "The page describes illustrative examples.",
+                "relevance_status": "relevant",
+            },
+            "entities": [{
+                "name": "Example Domain Registry",
+                "type": "Organization",
+                "description": "A named entity in the crawler structured data.",
+                "relevance": "Explicitly extracted from structured data.",
+                "source_url": "https://example.com",
+            }],
+            "contextual_findings": {
+                "findings": ["The page describes illustrative examples in documents."],
+                "relationships": [],
+                "answers_question": "The page supports this limited answer.",
+                "limitations": ["Only crawled page content is available."],
+                "unsupported_conclusions": [],
+            },
+            "evidence": [{
+                "claim": "The domain is used for illustrative examples.",
+                "source_url": "https://example.com",
+                "supporting_text": "This domain is established to be used for illustrative examples in documents.",
+                "confidence": CONF_SUPPORTED,
+            }],
+        }
+        self.assertTrue(_validate_llm_grounding(valid, SAMPLE_CRAWLER_DOC))
+
+        fabricated_quote = json.loads(json.dumps(valid))
+        fabricated_quote["evidence"][0]["supporting_text"] = "The company provides enterprise GPU clusters."
+        self.assertFalse(_validate_llm_grounding(fabricated_quote, SAMPLE_CRAWLER_DOC))
+
+        fabricated_source = json.loads(json.dumps(valid))
+        fabricated_source["evidence"][0]["source_url"] = "https://attacker.example/fake"
+        self.assertFalse(_validate_llm_grounding(fabricated_source, SAMPLE_CRAWLER_DOC))
+
+        fabricated_entity = json.loads(json.dumps(valid))
+        fabricated_entity["entities"][0]["name"] = "Invented Quantum Systems"
+        self.assertFalse(_validate_llm_grounding(fabricated_entity, SAMPLE_CRAWLER_DOC))
+
+    # 14. Deterministic entity extraction does not label a generic page title as an organization
+    def test_14_generic_title_is_not_misclassified_as_organization(self):
+        doc = json.loads(json.dumps(SAMPLE_CRAWLER_DOC))
+        doc["structured_data"] = {}
+        intel = generate_intelligence("Summarize this website", doc)
+        self.assertEqual(intel["entities"][0]["name"], "Example Domain")
+        self.assertEqual(intel["entities"][0]["type"], "Other")
+        self.assertEqual(VALID_ENTITY_TYPES.__contains__(intel["entities"][0]["type"]), True)
+
 
 
 if __name__ == "__main__":
