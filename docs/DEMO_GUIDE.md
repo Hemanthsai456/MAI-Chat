@@ -95,30 +95,38 @@ Visit https://example.com and extract its company name, services, contact inform
 > The backend parses the intent and generates a 5-step plan.  
 > Look at our real-time 10-stage execution visualizer: it tracks real backend events—from URL validation and tool selection, to subprocess launch and streaming output capture."
 
-### [2:45 – 4:00] Verification of Live Results, Grounded Intelligence & Exports
+### [2:45 – 3:45] Verification of Live Results, Grounded Intelligence & Exports
 > **Visual:** Scrolling through the green success banner, the Evidence-Grounded Intelligence cards (Direct Answer, Website Overview, Entities, Findings, Evidence), the summary, and the JSON code block. Opening the Execution Details accordion.  
 > **Speaker:**  
 > "The crawl has finished.  
-> Notice our new Evidence-Grounded Website Intelligence layer:  
-> First, it generates a natural-language answer from crawled text. LLM responses must pass schema, source URL, exact quote, and lexical overlap checks; this is conservative validation, not a proof of semantic correctness.  
+> Notice our Evidence-Grounded Website Intelligence layer:  
+> First, it generates a natural-language direct answer targeted to the user's question.  
 > Second, it provides a structured Website Overview—explaining what the site represents, its primary purpose, categories, and relevance.  
-> Third, it reports heuristic entity candidates based on extracted metadata, structured fields, and a small protocol vocabulary, with source URLs.  
-> Fourth, it provides contextual crawl findings and limitations; it does not infer relationships merely because two entities co-occur.  
-> Fifth, it cites verifiable evidence with transparent confidence tags: 'supported', 'partially supported', or 'not found in the crawled content'—strictly avoiding hallucinated percentage scores.  
+> Third, it reports heuristic entity candidates based on extracted metadata and structured fields, with source URLs.  
+> Fourth, it provides contextual crawl findings, limitations, and transparent evidence citations with labels like 'supported' or 'not found in the crawled content'—strictly avoiding hallucinated percentage scores.  
 > Below that is our verified extractive summary and the valid structured JSON output.  
-> In the Execution Details, we can see the exact tool executed—`site-crawler`—with an exit code of 0, running in 1.4 seconds, along with the actual stderr stream from the crawler.  
-> With one click, users can Copy JSON, Download JSON, Download a formatted Markdown report (which includes all intelligence sections), or Export CSV."
+> In the Execution Details, we can see the exact tool executed—`site-crawler`—with an exit code of 0, along with the actual stderr stream from the crawler.  
+> With one click, users can Copy JSON, Download JSON, Download a formatted Markdown report, or Export CSV."
 
-### [4:00 – 5:00] Failure Handling & Security Controls
+### [3:45 – 4:30] Interactive Follow-up Questions (Thread Memory)
+> **Visual:** Typing a follow-up question in the same chat: `"What is this domain used for?"` and hitting Enter.  
+> **Speaker:**  
+> "Now, notice one of our standout features: Conversation Threads and Stored Crawl Memory.  
+> I can ask a natural follow-up question without re-specifying the URL.  
+> The backend recognizes that this thread already has verified crawl memory. It routes the question as a follow-up, skips launching any new CLI subprocess, and avoids making duplicate network requests.  
+> The direct answer is synthesized instantly from stored memory, with full citations and focused JSON.  
+> If I ask for something not present on the site, such as a contact phone number, the system honestly states that the information is absent from the crawled pages, rather than hallucinating."
+
+### [4:30 – 5:15] Failure Handling & Security Controls
 > **Visual:** Clicking the 'Unreachable Host' example, then demonstrating task history.  
 > **Speaker:**  
-> "Now let's verify honest failure handling. I will request an unreachable domain:  
+> "Now let's verify honest failure handling. If I request an unreachable domain:  
 > The system catches the DNS resolution failure during validation, stops immediately without launching the CLI, and displays an honest red banner explaining the failure.  
 > Furthermore, if an attacker attempts an SSRF against internal IP addresses or cloud metadata endpoints like 169.254.169.254, our Anti-SSRF defenses reject the destination before any outbound connection can occur.  
-> Even if an off-site redirect is attempted, our custom redirect interceptor in `site_crawler.py` blocks it at the network layer."
+> Our connection layer resolves DNS once, validates all IP addresses against private ranges, and pins the socket connection to prevent DNS rebinding."
 
-### [5:00 – 6:00] Persistence, Recovery & Conclusion
-> **Visual:** Opening the Task History drawer, showing past runs and theme toggle.  
+### [5:15 – 6:00] Persistence, Recovery & Conclusion
+> **Visual:** Showing the Threads sidebar, switching between chats, and toggling dark/light theme.  
 > **Speaker:**  
-> "Finally, let's open the Persistent Task History drawer. Every task, duration, and status is durably stored in SQLite. If the server were to crash or restart, our startup recovery engine automatically inspects interrupted jobs and flags them as interrupted rather than losing track of them.  
-> In summary, MAI-Chat combines constrained CLI orchestration, crawler-side network protections, persistent task tracking, and evidence-checked website intelligence. It is not a kernel-sandboxed execution environment; child processes run with the server user's OS permissions. Thank you."
+> "Finally, let's look at the sidebar. Every thread, conversation history, and crawl memory is durably persisted in SQLite with Write-Ahead Logging. Even if the server restarts, everything is restored cleanly.  
+> In summary, MAI-Chat combines constrained CLI orchestration, crawler-side network protections, persistent thread memory, and evidence-checked website intelligence. Thank you."

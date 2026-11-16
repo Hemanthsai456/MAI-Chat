@@ -40,7 +40,7 @@ LLM_TIMEOUT_S = 10.0
 MAX_RESPONSE_BYTES = 32_768
 
 
-def generate_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any]:
+def generate_intelligence(question: str, doc: dict[str, Any], is_followup: bool = False) -> dict[str, Any]:
     """Generate structured website intelligence grounded strictly in validated crawler output.
 
     Attempts optional LLM interpretation if configured; gracefully falls back to
@@ -56,21 +56,23 @@ def generate_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any]:
     # Attempt LLM intelligence if configured
     if os.environ.get("LLM_API_KEY"):
         try:
-            llm_result = _call_llm_intelligence(clean_question, doc)
+            llm_result = _call_llm_intelligence(clean_question, doc, is_followup=is_followup)
             if llm_result:
                 return llm_result
         except Exception as exc:
             log.warning("Optional LLM intelligence failed (%s); falling back to deterministic analysis", exc)
 
     # Deterministic evidence-grounded fallback
-    return _generate_deterministic_intelligence(clean_question, doc)
+    return _generate_deterministic_intelligence(clean_question, doc, is_followup=is_followup)
 
 
 # ---------------------------------------------------------------------------
 # Deterministic Evidence-Grounded Analysis Engine
 # ---------------------------------------------------------------------------
 
-def _generate_deterministic_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any]:
+def _generate_deterministic_intelligence(
+    question: str, doc: dict[str, Any], is_followup: bool = False
+) -> dict[str, Any]:
     """Extract and synthesize grounded intelligence deterministically without an LLM."""
     pages = doc.get("pages", [])
     first_page = pages[0] if pages else {}
@@ -81,8 +83,8 @@ def _generate_deterministic_intelligence(question: str, doc: dict[str, Any]) -> 
     structured_data = doc.get("structured_data", {})
 
     # 1. Answer Synthesis & Question Matching
-    direct_answer, relevance_status, matched_claims = _synthesize_answer_and_relevance(
-        question, host, pages, combined_text, all_headings, structured_data
+    direct_answer, relevance_status, matched_claims, query_keywords = _synthesize_answer_and_relevance(
+        question, host, pages, combined_text, all_headings, structured_data, is_followup=is_followup
     )
 
     # 2. Website Overview
@@ -100,20 +102,31 @@ def _generate_deterministic_intelligence(question: str, doc: dict[str, Any]) -> 
     else:
         relevance_explanation = f"The website content does not appear to contain information addressing your specific inquiry."
 
-    overview = {
-        "represents": represents,
-        "purpose": purpose,
-        "categories": categories,
-        "relevance": relevance_explanation,
-        "relevance_status": relevance_status,
-    }
+    if is_followup:
+        overview = {
+            "represents": f"Question Target: {question}",
+            "purpose": f"Scope: Grounded query against stored crawl of {host}.",
+            "categories": [c for c in categories if any(kw in c.lower() for kw in query_keywords)] or categories[:2],
+            "relevance": relevance_explanation,
+            "relevance_status": relevance_status,
+        }
+    else:
+        overview = {
+            "represents": represents,
+            "purpose": purpose,
+            "categories": categories,
+            "relevance": relevance_explanation,
+            "relevance_status": relevance_status,
+        }
 
-    # 3. Entity Analysis
-    entities = _extract_grounded_entities(pages, structured_data, host)
+    # 3. Entity Analysis (filtered to relevant keywords on follow-up)
+    entities = _extract_grounded_entities(
+        pages, structured_data, host, query_keywords=(query_keywords if is_followup else None)
+    )
 
     # 4. Contextual Findings
     findings, relationships, limitations, unsupported = _derive_contextual_findings(
-        question, pages, entities, relevance_status, combined_text
+        question, pages, entities, relevance_status, combined_text, is_followup=is_followup
     )
 
     contextual = {
@@ -125,7 +138,7 @@ def _generate_deterministic_intelligence(question: str, doc: dict[str, Any]) -> 
     }
 
     # 5. Evidence & Confidence
-    evidence_items = _compile_evidence(pages, matched_claims, relevance_status)
+    evidence_items = _compile_evidence(pages, matched_claims, relevance_status, is_followup=is_followup)
 
     return {
         "direct_answer": direct_answer,
@@ -145,43 +158,99 @@ def _synthesize_answer_and_relevance(
     combined_text: str,
     headings: list[str],
     structured_data: dict[str, Any],
-) -> tuple[str, str, list[dict[str, str]]]:
-    """Determine direct answer, relevance status, and extract matching claims."""
-    q_lower = question.lower()
-    first_page = pages[0]
+    is_followup: bool = False,
+) -> tuple[str, str, list[dict[str, str]], list[str]]:
+    """Determine direct answer, relevance status, extract matching claims, and return query keywords."""
+    q_lower = question.lower().strip()
+    first_page = pages[0] if pages else {}
     first_title = first_page.get("title", "Untitled")
     first_url = first_page.get("url", "")
     total_words = sum(p.get("word_count", 0) for p in pages)
 
     matched_claims: list[dict[str, str]] = []
 
-    # Check for general crawl / summary instruction
-    is_general_crawl = any(kw in q_lower for kw in ("crawl", "extract", "summar", "give me", "json format", "browse"))
-
-    # Extract substantive query keywords (ignore stop words)
-    stop_words = {"crawl", "extract", "summary", "give", "and", "the", "a", "an", "is", "of", "to", "in", "for", "what", "who", "where", "how", "json", "format", "site", "website", "http", "https", "url", "page", "pages", "me", "it", "its"}
-    tokens = [t.strip(".,;:?!'\"") for t in re.findall(r"\b\w+\b", q_lower)]
+    # Stop words that don't help identify the specific question topic
+    stop_words = {
+        "crawl", "extract", "summary", "summarize", "summarise", "give", "tell", "show", "and", "the", "a", "an",
+        "is", "are", "was", "were", "of", "to", "in", "for", "with", "about", "what", "who", "where",
+        "how", "when", "why", "which", "json", "format", "site", "website", "http", "https", "url",
+        "page", "pages", "me", "it", "its", "this", "that", "these", "those", "can", "you", "does",
+        "mentioned", "listed", "found", "there", "have", "has", "do", "any", "some", "question", "ask",
+        "please", "could", "would", "information", "info", "get", "all", "important"
+    }
+    tokens = [t.strip(".,;:?!'\"()") for t in re.findall(r"\b\w+\b", q_lower)]
     query_keywords = [t for t in tokens if len(t) > 2 and t not in stop_words]
 
-    # Keyword matching against crawled text
-    matched_kws = [kw for kw in query_keywords if kw in combined_text.lower() or any(kw in h.lower() for h in headings)]
+    # Check for general crawl / summary instruction
+    is_url_in_prompt = bool(re.search(r"https?://", q_lower))
+    specific_question_markers = ("what", "who", "where", "when", "why", "how", "is there", "does", "which", "are there", "tell me about")
+    has_specific_question = any(q_lower.startswith(w) or f" {w} " in q_lower for w in specific_question_markers) or "?" in question
 
-    # Match sentences per page so evidence retains its actual source URL.
-    relevant_sentences = []
+    if is_followup:
+        is_general_crawl = False
+    elif is_url_in_prompt and not has_specific_question and any(kw in q_lower for kw in ("crawl", "extract", "summar", "json format", "browse")):
+        is_general_crawl = True
+    else:
+        is_general_crawl = False
+
+    # Collect sentence candidates with relevance scoring
+    candidate_matches: list[tuple[int, str, str]] = []
+
+    # 1. Check structured data fields
+    if structured_data and query_keywords:
+        for k, v in structured_data.items():
+            if not v:
+                continue
+            v_str = str(v)
+            k_clean = k.replace("_", " ").lower()
+            if any(kw in k_clean for kw in query_keywords) or any(kw in v_str.lower() for kw in query_keywords):
+                candidate_matches.append((10, first_url, f"Extracted {k.replace('_', ' ')}: {v_str}"))
+
+    # 2. Check page headings
+    if query_keywords:
+        for page in pages:
+            p_url = page.get("url", "")
+            for h in page.get("headings", []):
+                h_text = h.get("text", "")
+                if h_text and any(kw in h_text.lower() for kw in query_keywords):
+                    candidate_matches.append((5, p_url, f"Section heading: '{h_text}'"))
+
+    # 3. Check page excerpts sentence by sentence
     for page in pages:
-        page_url = page.get("url", "")
+        p_url = page.get("url", "")
         sentences = re.split(r"(?<=[.!?])\s+", page.get("excerpt", ""))
         for sentence in sentences:
-            clean_sentence = sentence.strip()
-            if len(clean_sentence) > 15 and any(kw in clean_sentence.lower() for kw in query_keywords):
-                relevant_sentences.append(clean_sentence)
-                matched_claims.append({
-                    "claim": clean_sentence[:120],
-                    "text": clean_sentence,
-                    "url": page_url,
-                })
+            clean_s = sentence.strip()
+            if len(clean_s) < 15:
+                continue
+            s_lower = clean_s.lower()
+            matching_kws = [kw for kw in query_keywords if kw in s_lower]
+            if matching_kws:
+                score = len(matching_kws) * 2
+                if any(kw in s_lower[:50] for kw in query_keywords):
+                    score += 1
+                candidate_matches.append((score, p_url, clean_s))
 
-    if is_general_crawl or not query_keywords:
+    # Deduplicate candidate matches
+    candidate_matches.sort(key=lambda x: x[0], reverse=True)
+    unique_matches: list[tuple[int, str, str]] = []
+    seen_texts = set()
+    for sc, p_url, s_text in candidate_matches:
+        if s_text not in seen_texts:
+            seen_texts.add(s_text)
+            unique_matches.append((sc, p_url, s_text))
+
+    for _, p_url, s_text in unique_matches[:3]:
+        matched_claims.append({
+            "claim": s_text[:120],
+            "text": s_text,
+            "url": p_url,
+        })
+
+    # Substantive keyword presence in text
+    matched_kws = [kw for kw in query_keywords if kw in combined_text.lower() or any(kw in h.lower() for h in headings)]
+
+    if is_general_crawl or (not is_followup and not query_keywords):
         relevance_status = "relevant"
         answer = (
             f"Successfully crawled {host} across {len(pages)} page(s) ({total_words} words). "
@@ -200,31 +269,51 @@ def _synthesize_answer_and_relevance(
                 "text": first_page["excerpt"][:200],
                 "url": first_url,
             })
-    elif relevant_sentences:
+    elif unique_matches:
         relevance_status = "relevant"
-        top_sentence = relevant_sentences[0]
-        answer = (
-            f"Based on the content from {host}, {top_sentence} "
-        )
-        if len(relevant_sentences) > 1:
-            answer += f"Additionally, the site notes: \"{relevant_sentences[1]}\". "
-        answer += f"(Source: {first_url})"
+        primary_match = unique_matches[0][2]
+        source_url = unique_matches[0][1]
+
+        if is_followup:
+            answer = f"According to {host}: \"{primary_match}\""
+            if len(unique_matches) > 1 and unique_matches[1][2] != primary_match:
+                answer += f" Additionally: \"{unique_matches[1][2]}\""
+            answer += f" (Source: {source_url})"
+        else:
+            answer = f"Based on the content from {host}, \"{primary_match}\""
+            if len(unique_matches) > 1:
+                answer += f" Additionally, the site notes: \"{unique_matches[1][2]}\"."
+            answer += f" (Source: {source_url})"
     elif matched_kws:
         relevance_status = "partially_relevant"
-        answer = (
-            f"The crawled content from {host} references related terms ({', '.join(matched_kws)}), "
-            f"but does not contain a comprehensive answer to '{question}'. "
-            f"Available content on the site: \"{first_page.get('excerpt', '')[:180]}\"."
-        )
+        if is_followup:
+            answer = (
+                f"The crawled content from {host} mentions related terms ({', '.join(matched_kws)}), "
+                f"but does not directly state an answer to '{question}'. "
+                f"Related excerpt from {first_url}: \"{first_page.get('excerpt', '')[:180]}\"."
+            )
+        else:
+            answer = (
+                f"The crawled content from {host} references related terms ({', '.join(matched_kws)}), "
+                f"but does not contain a comprehensive answer to '{question}'. "
+                f"Available content on the site: \"{first_page.get('excerpt', '')[:180]}\"."
+            )
     else:
         relevance_status = "not_relevant"
-        answer = (
-            f"The crawled content from {host} does not contain information to answer the question: '{question}'. "
-            f"The crawled pages ({len(pages)} page(s), {total_words} words) only provide text regarding "
-            f"'{first_title}' and do not mention the requested subjects."
-        )
+        topic = " ".join(query_keywords) if query_keywords else f"'{question}'"
+        if is_followup:
+            answer = (
+                f"The crawled content from {host} does not contain information to answer your question about {topic}. "
+                f"The crawled pages ({len(pages)} page(s), {total_words} words) focus on '{first_title}' and do not mention this subject."
+            )
+        else:
+            answer = (
+                f"The crawled content from {host} does not contain information to answer the question: '{question}'. "
+                f"The crawled pages ({len(pages)} page(s), {total_words} words) only provide text regarding "
+                f"'{first_title}' and do not mention the requested subjects."
+            )
 
-    return answer, relevance_status, matched_claims
+    return answer, relevance_status, matched_claims, query_keywords
 
 
 def _derive_categories(headings: list[str], first_page: dict[str, Any], structured_data: dict[str, Any]) -> list[str]:
@@ -256,7 +345,10 @@ def _derive_categories(headings: list[str], first_page: dict[str, Any], structur
 
 
 def _extract_grounded_entities(
-    pages: list[dict[str, Any]], structured_data: dict[str, Any], host: str
+    pages: list[dict[str, Any]],
+    structured_data: dict[str, Any],
+    host: str,
+    query_keywords: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract entities that are strictly grounded in the crawled text."""
     entities: list[dict[str, Any]] = []
@@ -351,6 +443,14 @@ def _extract_grounded_entities(
                 "source_url": first_url,
             })
 
+    # For follow-up questions, filter entities to only those matching query keywords
+    if query_keywords:
+        filtered = [
+            e for e in entities
+            if any(kw in e["name"].lower() or kw in e["type"].lower() or kw in e["description"].lower() for kw in query_keywords)
+        ]
+        return filtered[:4]
+
     return entities[:6]
 
 
@@ -360,11 +460,34 @@ def _derive_contextual_findings(
     entities: list[dict[str, Any]],
     relevance_status: str,
     combined_text: str,
+    is_followup: bool = False,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Synthesize contextual findings, entity relationships, limitations, and unsupported conclusions."""
     first_page = pages[0] if pages else {}
     first_title = first_page.get("title", "the target")
     word_count = sum(p.get("word_count", 0) for p in pages)
+    host = urllib.parse.urlsplit(first_page.get("url", "")).hostname or "target website"
+
+    if is_followup:
+        findings = [
+            f"Evaluated follow-up query '{question}' against stored crawl ({len(pages)} page(s), {word_count} words).",
+        ]
+        if relevance_status == "relevant":
+            findings.append("Identified matching statements directly addressing the question in the crawled text.")
+        elif relevance_status == "partially_relevant":
+            findings.append("Found mentions of related terms, but incomplete coverage of the specific question.")
+        else:
+            findings.append(f"The topic '{question}' is not mentioned in the crawled pages.")
+
+        relationships: list[str] = []
+        limitations = [
+            f"Evidence is strictly bounded to the stored crawl of {host} ({len(pages)} page(s)).",
+            "No live network requests were made; answer reflects stored crawl memory.",
+        ]
+        unsupported = [
+            f"Cannot infer facts about '{question}' not explicitly stated in the source text.",
+        ]
+        return findings[:3], relationships, limitations[:2], unsupported[:2]
 
     findings = [
         f"Retrieved {len(pages)} page(s) totaling {word_count} words from {first_page.get('url')}.",
@@ -397,7 +520,10 @@ def _derive_contextual_findings(
 
 
 def _compile_evidence(
-    pages: list[dict[str, Any]], matched_claims: list[dict[str, str]], relevance_status: str
+    pages: list[dict[str, Any]],
+    matched_claims: list[dict[str, str]],
+    relevance_status: str,
+    is_followup: bool = False,
 ) -> list[dict[str, Any]]:
     """Compile verifiable evidence citations with transparent confidence labels."""
     evidence: list[dict[str, Any]] = []
@@ -412,14 +538,15 @@ def _compile_evidence(
             "confidence": CONF_SUPPORTED,
         })
 
-    # Add core page title evidence
-    if first_page.get("title") and not any(e["claim"] == first_page["title"] for e in evidence):
-        evidence.append({
-            "claim": f"Site title is '{first_page['title']}'",
-            "source_url": first_url,
-            "supporting_text": first_page.get("excerpt", "")[:180] or first_page["title"],
-            "confidence": CONF_SUPPORTED,
-        })
+    # Add core page title evidence only if not a targeted follow-up with matching claims
+    if not is_followup or not matched_claims:
+        if first_page.get("title") and not any(e["claim"] == first_page["title"] for e in evidence):
+            evidence.append({
+                "claim": f"Site title is '{first_page['title']}'",
+                "source_url": first_url,
+                "supporting_text": first_page.get("excerpt", "")[:180] or first_page["title"],
+                "confidence": CONF_SUPPORTED,
+            })
 
     # If question was unsupported, add transparent ungrounded evidence marker
     if relevance_status == "not_relevant":
@@ -473,7 +600,9 @@ def _build_empty_intelligence(question: str, doc: dict[str, Any]) -> dict[str, A
 # Optional LLM Intelligence Engine (OpenAI-compatible)
 # ---------------------------------------------------------------------------
 
-def _call_llm_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any] | None:
+def _call_llm_intelligence(
+    question: str, doc: dict[str, Any], is_followup: bool = False
+) -> dict[str, Any] | None:
     """Invokes optional LLM API with strict anti-injection and schema-enforcing constraints."""
     api_key = os.environ.get("LLM_API_KEY")
     if not api_key:
@@ -514,6 +643,16 @@ def _call_llm_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any]
         "   - 'contextual_findings': { 'findings': [str], 'relationships': [str], 'answers_question': str, 'limitations': [str], 'unsupported_conclusions': [str] }\n"
         "   - 'evidence': [ { 'claim': str, 'source_url': str, 'supporting_text': str, 'confidence': 'supported'|'partially supported'|'not found in the crawled content' } ]\n"
     )
+
+    if is_followup:
+        system_prompt += (
+            "\nSPECIAL INSTRUCTIONS FOR FOLLOW-UP QUESTION:\n"
+            "This is a follow-up question within an existing conversation about an already-crawled site.\n"
+            "- Focus your direct_answer directly and specifically on answering the user's follow-up question.\n"
+            "- Do NOT provide a generic summary of the entire website.\n"
+            "- In 'entities', include ONLY entities directly relevant to the specific question asked. If none are relevant, return an empty list [].\n"
+            "- In 'contextual_findings', focus strictly on findings and evidence addressing this specific question.\n"
+        )
 
     user_prompt = (
         f"User Question: {question}\n\n"

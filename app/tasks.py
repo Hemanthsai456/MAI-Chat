@@ -457,9 +457,16 @@ class TaskManager:
             output = io.StringIO()
             writer = csv.writer(output)
             writer.writerow(["Page URL", "Title", "Word Count", "Status Code", "Headings"])
-            if payload and isinstance(payload, dict) and "pages" in payload:
-                for p in payload["pages"]:
-                    headings_str = " | ".join(p.get("headings", []))
+            if payload and isinstance(payload, dict):
+                pages_list = payload.get("pages") or payload.get("referenced_pages") or []
+                for p in pages_list:
+                    raw_headings = p.get("headings", [])
+                    if raw_headings and isinstance(raw_headings[0], dict):
+                        headings_str = " | ".join(h.get("text", "") for h in raw_headings if h.get("text"))
+                    elif raw_headings and isinstance(raw_headings[0], str):
+                        headings_str = " | ".join(raw_headings)
+                    else:
+                        headings_str = ""
                     writer.writerow([
                         p.get("url", ""),
                         p.get("title", ""),
@@ -530,16 +537,19 @@ class TaskManager:
                     lines.append(f"- **{err.get('url')}**: {err.get('error')}")
                 lines.append("")
 
-            if task.result and "payload" in task.result and "pages" in task.result["payload"]:
-                lines.extend(["## Crawled Pages", ""])
-                for i, page in enumerate(task.result["payload"]["pages"], 1):
-                    lines.extend([
-                        f"### {i}. {page.get('title') or 'Untitled'}",
-                        f"- **URL:** {page.get('url')}",
-                        f"- **Words:** {page.get('word_count')}",
-                        f"- **Excerpt:** {page.get('excerpt')}",
-                        "",
-                    ])
+            if task.result and "payload" in task.result:
+                pages_to_show = task.result["payload"].get("pages") or task.result["payload"].get("referenced_pages") or []
+                if pages_to_show:
+                    heading_title = "Referenced Pages" if "referenced_pages" in task.result["payload"] else "Crawled Pages"
+                    lines.extend([f"## {heading_title}", ""])
+                    for i, page in enumerate(pages_to_show, 1):
+                        lines.extend([
+                            f"### {i}. {page.get('title') or 'Untitled'}",
+                            f"- **URL:** {page.get('url')}",
+                            f"- **Words:** {page.get('word_count')}",
+                            f"- **Excerpt:** {page.get('excerpt')}",
+                            "",
+                        ])
 
             return "\n".join(lines), "text/markdown; charset=utf-8", f"task_{task_id_short}.md"
 
@@ -760,7 +770,7 @@ class TaskManager:
 
             intel = None
             try:
-                intel = generate_intelligence(question, crawl_doc)
+                intel = generate_intelligence(question, crawl_doc, is_followup=True)
             except Exception as exc:
                 log.warning("Intelligence generation on followup encountered error: %s", exc)
 
@@ -771,18 +781,51 @@ class TaskManager:
             banner_kind = "success" if task_status == SUCCEEDED else "warning"
             banner_text = f"Answered from the crawl of {host} (stored {time_str}). No new crawl was run."
 
+            # Filter referenced pages based on cited evidence or primary page
+            cited_urls = {ev.get("source_url") for ev in (intel.get("evidence", []) if intel else []) if ev.get("source_url")}
+            for ent in (intel.get("entities", []) if intel else []):
+                if ent.get("source_url"):
+                    cited_urls.add(ent.get("source_url"))
+
+            referenced_pages = [
+                {
+                    "url": p.get("url", ""),
+                    "title": p.get("title", ""),
+                    "word_count": p.get("word_count", 0),
+                    "headings": [h.get("text", "") for h in p.get("headings", []) if h.get("text")][:5],
+                    "excerpt": p.get("excerpt", "")[:300],
+                }
+                for p in crawl_doc.get("pages", [])
+                if p.get("url") in cited_urls
+            ]
+            if not referenced_pages and crawl_doc.get("pages"):
+                p0 = crawl_doc["pages"][0]
+                referenced_pages = [{
+                    "url": p0.get("url", ""),
+                    "title": p0.get("title", ""),
+                    "word_count": p0.get("word_count", 0),
+                    "headings": [h.get("text", "") for h in p0.get("headings", []) if h.get("text")][:5],
+                    "excerpt": p0.get("excerpt", "")[:300],
+                }]
+
             payload = {
                 "task": TASK_FOLLOWUP,
                 "status": task_status,
-                "input": {"url": context.get("target_url", ""), "question": question},
-                "summary": intel.get("direct_answer", "") if intel else "",
-                "site": {
+                "query": {
+                    "question": question,
+                    "target_url": context.get("target_url", ""),
                     "host": host,
-                    "title": crawl_doc.get("pages", [{}])[0].get("title", "") if crawl_doc.get("pages") else host,
                 },
-                "pages": crawl_doc.get("pages", []),
-                "errors": crawl_doc.get("errors", []),
-                "intelligence": intel,
+                "direct_answer": intel.get("direct_answer", "") if intel else "",
+                "evidence": intel.get("evidence", []) if intel else [],
+                "relevant_entities": intel.get("entities", []) if intel else [],
+                "contextual_findings": intel.get("contextual_findings", {}) if intel else {},
+                "referenced_pages": referenced_pages,
+                "source_crawl": {
+                    "host": host,
+                    "total_pages_in_memory": len(crawl_doc.get("pages", [])),
+                    "crawled_at": time_str,
+                },
             }
 
             res = build_message(

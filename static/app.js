@@ -389,7 +389,9 @@
     if (intel) {
       const intelSection = make("div", "intel-section");
       renderDirectAnswer(intelSection, intel);
-      renderWebsiteOverview(intelSection, intel.website_overview || result.overview);
+      if (!isFollowup) {
+        renderWebsiteOverview(intelSection, intel.website_overview || result.overview);
+      }
       renderEntities(intelSection, intel.entities || result.entities);
       renderContextualFindings(intelSection, intel.contextual_findings || result.findings);
       renderEvidence(intelSection, intel.evidence || result.evidence);
@@ -397,15 +399,18 @@
     } else if (result.answer) {
       const intelSection = make("div", "intel-section");
       renderDirectAnswer(intelSection, { direct_answer: result.answer, generator: "deterministic" });
-      renderWebsiteOverview(intelSection, result.overview);
+      if (!isFollowup) {
+        renderWebsiteOverview(intelSection, result.overview);
+      }
       renderEntities(intelSection, result.entities);
       renderContextualFindings(intelSection, result.findings);
       renderEvidence(intelSection, result.evidence);
       bubble.appendChild(intelSection);
     }
 
-    // Verified Extractive Summary
-    if (result.summary) {
+    // Verified Extractive Summary (suppressed on followups or when identical to direct answer)
+    const directAns = (intel && intel.direct_answer) || result.answer || "";
+    if (result.summary && !isFollowup && result.summary !== directAns) {
       const sumCard = make("div", "intel-card");
       sumCard.appendChild(make("h4", "intel-title", "Verified Extractive Summary"));
       sumCard.appendChild(make("div", "prose", result.summary));

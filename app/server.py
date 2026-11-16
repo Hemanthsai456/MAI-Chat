@@ -355,6 +355,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
                 self._send_json(202, {
                     "id": task.id,
+                    "task_id": task.id,
                     "thread_id": thread_id,
                     "route": "followup",
                     "decision": "followup",
@@ -379,6 +380,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 plan_dict = decision.intent.plan.to_dict() if decision.intent.plan else None
                 self._send_json(202, {
                     "id": task.id,
+                    "task_id": task.id,
                     "thread_id": thread_id,
                     "route": "crawl",
                     "decision": "crawl",
