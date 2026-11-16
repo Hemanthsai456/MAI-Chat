@@ -166,18 +166,19 @@ def _synthesize_answer_and_relevance(
     # Keyword matching against crawled text
     matched_kws = [kw for kw in query_keywords if kw in combined_text.lower() or any(kw in h.lower() for h in headings)]
 
-    # Match sentences from excerpt
-    sentences = re.split(r"(?<=[.!?])\s+", combined_text)
+    # Match sentences per page so evidence retains its actual source URL.
     relevant_sentences = []
-    for s in sentences:
-        s_clean = s.strip()
-        if len(s_clean) > 15:
-            if any(kw in s_clean.lower() for kw in query_keywords):
-                relevant_sentences.append(s_clean)
+    for page in pages:
+        page_url = page.get("url", "")
+        sentences = re.split(r"(?<=[.!?])\s+", page.get("excerpt", ""))
+        for sentence in sentences:
+            clean_sentence = sentence.strip()
+            if len(clean_sentence) > 15 and any(kw in clean_sentence.lower() for kw in query_keywords):
+                relevant_sentences.append(clean_sentence)
                 matched_claims.append({
-                    "claim": s_clean[:120],
-                    "text": s_clean,
-                    "url": first_url,
+                    "claim": clean_sentence[:120],
+                    "text": clean_sentence,
+                    "url": page_url,
                 })
 
     if is_general_crawl or not query_keywords:
@@ -263,16 +264,21 @@ def _extract_grounded_entities(
     first_page = pages[0] if pages else {}
     first_url = first_page.get("url", f"https://{host}")
 
-    # 1. Primary Organization/Entity
-    primary_name = structured_data.get("company_name") or first_page.get("title") or host
+    # A page title is not automatically an organization.
+    primary_name = structured_data.get("company_name")
+    if not isinstance(primary_name, str) or not primary_name.strip():
+        primary_name = first_page.get("title") or host
+        primary_type = "Other"
+    else:
+        primary_type = "Organization"
     if primary_name and primary_name not in seen_names:
         seen_names.add(primary_name)
-        desc = first_page.get("meta_description") or first_page.get("excerpt", "")[:140] or f"Subject of the website at {host}"
+        desc = first_page.get("meta_description") or first_page.get("excerpt", "")[:140] or f"Website identified at {host}"
         entities.append({
             "name": primary_name,
-            "type": "Organization",
+            "type": primary_type,
             "description": desc,
-            "relevance": "Primary entity and subject of the crawled domain.",
+            "relevance": "Primary name extracted from crawler metadata or structured fields.",
             "source_url": first_url,
         })
 
@@ -288,14 +294,22 @@ def _extract_grounded_entities(
     ]
     for tech_name, tech_desc in tech_candidates:
         if re.search(r"\b" + re.escape(tech_name) + r"\b", all_text, re.IGNORECASE):
-            if tech_name not in seen_names:
+            source_page = next(
+                (p for p in pages if re.search(
+                    r"\b" + re.escape(tech_name) + r"\b",
+                    " ".join([p.get("excerpt", "")] + [h.get("text", "") for h in p.get("headings", [])]),
+                    re.IGNORECASE,
+                )),
+                None,
+            )
+            if source_page is not None and tech_name not in seen_names:
                 seen_names.add(tech_name)
                 entities.append({
                     "name": tech_name,
                     "type": "Technology",
                     "description": tech_desc,
-                    "relevance": f"Technical protocol or standard referenced in site content.",
-                    "source_url": first_url,
+                    "relevance": "Mentioned explicitly in the cited page content.",
+                    "source_url": source_page.get("url", first_url),
                 })
 
     # 3. Services / Products from structured data
@@ -308,8 +322,8 @@ def _extract_grounded_entities(
                     entities.append({
                         "name": item,
                         "type": "Service" if "service" in key else "Product",
-                        "description": f"Extracted {key[:-1] if key.endswith('s') else key} item from page headings.",
-                        "relevance": f"Identified as an offering provided by {primary_name}.",
+                        "description": f"Value returned in the crawler's structured '{key}' field.",
+                        "relevance": "Listed in structured extraction; availability is not independently established.",
                         "source_url": first_url,
                     })
 
@@ -322,8 +336,8 @@ def _extract_grounded_entities(
             seen_names.add(emails[0])
             entities.append({
                 "name": emails[0],
-                "type": "Contact",
-                "description": "Public contact email address found in page content.",
+                "type": "Other",
+                "description": "Email address returned in the crawler's structured contact fields.",
                 "relevance": "Direct communication channel published by the entity.",
                 "source_url": first_url,
             })
@@ -331,8 +345,8 @@ def _extract_grounded_entities(
             seen_names.add(phones[0])
             entities.append({
                 "name": phones[0],
-                "type": "Contact",
-                "description": "Telephone contact number found in page content.",
+                "type": "Other",
+                "description": "Phone number returned in the crawler's structured contact fields.",
                 "relevance": "Customer support or inquiry phone number.",
                 "source_url": first_url,
             })
@@ -361,20 +375,16 @@ def _derive_contextual_findings(
         if headings_preview:
             findings.append(f"Major content headings: {', '.join(headings_preview)}.")
 
+    # Co-occurrence is not proof of a semantic relationship.
     relationships = []
-    if entities:
-        main_ent = entities[0]["name"]
-        for other in entities[1:]:
-            relationships.append(f"{main_ent} utilizes or references {other['type'].lower()} '{other['name']}'.")
-
-    if not relationships:
-        relationships.append(f"Content on this site focuses centrally on {first_title}.")
 
     limitations = [
         f"Evidence is strictly bounded to {len(pages)} crawled page(s).",
     ]
     if len(pages) == 1:
         limitations.append("Deeper child pages and external links were not traversed.")
+    if entities:
+        limitations.append("Entity co-occurrence is not treated as proof of a relationship; no relationship is asserted without explicit evidence.")
 
     unsupported = [
         "Cannot verify claims or details not published directly within the crawled pages.",
@@ -548,14 +558,16 @@ def _call_llm_intelligence(question: str, doc: dict[str, Any]) -> dict[str, Any]
             return None
         parsed = json.loads(content[start_idx : end_idx + 1])
 
-        # Validate schema conformance
-        if _validate_intelligence_schema(parsed):
+        # Schema validity is necessary but insufficient: check source URLs,
+        # exact quotes, answer overlap, and entity names against crawl data.
+        if _validate_intelligence_schema(parsed) and _validate_llm_grounding(parsed, doc):
+            # Do not infer semantic relations from entity co-occurrence.
+            parsed["contextual_findings"]["relationships"] = []
             parsed["generator"] = "llm"
             parsed["model"] = model
             return parsed
-        else:
-            log.warning("LLM response did not conform to intelligence schema; discarding")
-            return None
+        log.warning("LLM response failed schema or evidence-grounding validation; discarding")
+        return None
 
 
 def _validate_intelligence_schema(data: Any) -> bool:
@@ -616,4 +628,98 @@ def _validate_intelligence_schema(data: Any) -> bool:
         ):
             return False
 
+    return True
+
+
+def _normalise_evidence_text(value: str) -> str:
+    """Normalise whitespace and case for exact evidence-quote comparison."""
+    return " ".join(str(value).casefold().split())
+
+
+def _page_text(page: dict[str, Any]) -> str:
+    """Return text fields actually collected for a crawled page."""
+    headings = page.get("headings", [])
+    heading_text = " ".join(
+        h.get("text", "") for h in headings
+        if isinstance(h, dict) and isinstance(h.get("text"), str)
+    )
+    return " ".join(filter(None, (
+        page.get("url", ""), page.get("title", ""),
+        page.get("meta_description", ""), page.get("excerpt", ""), heading_text,
+    )))
+
+
+def _has_grounded_overlap(candidate: str, corpus: str, minimum_ratio: float = 0.35) -> bool:
+    """Reject prose whose substantive terms are mostly absent from crawl evidence."""
+    stop = {
+        "the", "and", "for", "with", "from", "that", "this", "these", "those",
+        "are", "was", "were", "has", "have", "had", "its", "their", "they",
+        "you", "your", "website", "site", "page", "content", "based", "found",
+        "shows", "about", "into", "also", "which", "what", "when", "where",
+        "while", "using", "uses", "provides", "includes", "presents",
+    }
+    terms = {
+        token for token in re.findall(r"[a-z0-9][a-z0-9._+-]*", candidate.casefold())
+        if len(token) > 2 and token not in stop
+    }
+    if not terms:
+        return True
+    corpus_lower = corpus.casefold()
+    matched = sum(1 for term in terms if term in corpus_lower)
+    return matched >= 1 and (matched / len(terms)) >= minimum_ratio
+
+
+def _validate_llm_grounding(data: dict[str, Any], doc: dict[str, Any]) -> bool:
+    """Conservatively validate LLM citations and entities against crawled evidence.
+
+    This lexical/quotation check is not semantic proof. Uncertain responses are
+    discarded in favour of deterministic analysis.
+    """
+    pages = doc.get("pages") or []
+    page_by_url = {
+        page.get("url"): page for page in pages
+        if isinstance(page, dict) and isinstance(page.get("url"), str) and page.get("url")
+    }
+    if not page_by_url:
+        return False
+
+    page_corpora = {url: _page_text(page) for url, page in page_by_url.items()}
+    structured_text = json.dumps(doc.get("structured_data", {}), ensure_ascii=False, default=str)
+    all_corpus = " ".join(page_corpora.values()) + " " + structured_text
+
+    evidence = data.get("evidence", [])
+    if not evidence:
+        return False
+    verified_quotes = []
+    for item in evidence:
+        source_url = item.get("source_url", "")
+        if source_url not in page_corpora:
+            return False
+        confidence = item.get("confidence")
+        quote = _normalise_evidence_text(item.get("supporting_text", ""))
+        source_text = _normalise_evidence_text(page_corpora[source_url])
+        if confidence in (CONF_SUPPORTED, CONF_PARTIAL):
+            if len(quote) < 20 or quote not in source_text:
+                return False
+            if not _has_grounded_overlap(item.get("claim", ""), quote, 0.25):
+                return False
+            verified_quotes.append(item.get("supporting_text", ""))
+
+    if not verified_quotes:
+        return False
+    if not _has_grounded_overlap(data.get("direct_answer", ""), all_corpus, 0.35):
+        return False
+
+    findings = data.get("contextual_findings", {}).get("findings", [])
+    if any(not _has_grounded_overlap(str(item), all_corpus, 0.35) for item in findings):
+        return False
+
+    # Named entities must occur in their cited page or in crawler structured data.
+    for entity in data.get("entities", []):
+        source_url = entity.get("source_url", "")
+        name = entity.get("name", "").strip().casefold()
+        if source_url not in page_corpora or not name:
+            return False
+        if name not in page_corpora[source_url].casefold() and name not in structured_text.casefold():
+            return False
     return True
