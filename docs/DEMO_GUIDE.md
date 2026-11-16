@@ -24,10 +24,10 @@ Or click the primary example chip: **★ Mandatory Demo (example.com)**.
 2. **10-Stage Real Execution Pipeline:** Watch the stage visualizer progress through:
    - `Request received` → `Intent interpreted` → `Plan prepared` → `Input validated` → `Approved CLI selected` → `CLI process started` → `Execution running` → `Output captured` → `Result validated` → `Task completed`.
 3. **Evidence-Grounded Intelligence Cards:**
-   - **Direct Answer:** A clear, natural-language answer to the user's inquiry grounded directly in crawled text.
+   - **Direct Answer:** A natural-language answer generated from crawled text; LLM output is subject to conservative URL, quote, and lexical checks, not full semantic proof.
    - **Website Overview:** Explains what the site represents, its purpose, categories, and relevance to the query.
-   - **Relevant Entities:** Structured cards showing detected entities (Organization, Technology, Service) with descriptions and source links.
-   - **Contextual Findings:** Key findings, relationships, answers to questions, limitations, and unsupported conclusions.
+   - **Relevant Entities:** Structured cards showing heuristic entity candidates from crawler metadata, structured fields, and a limited technology vocabulary, with source links.
+   - **Contextual Findings:** Crawl-derived observations, question relevance, limitations, and unsupported conclusions. Relationship claims are omitted unless explicitly supported.
    - **Evidence & Limitations:** Bounded citations with supporting quotes and transparent confidence tags (`supported`, `partially supported`, `not found in the crawled content`).
 4. **Verified Summary:** A clean, accurate extractive summary synthesized directly from crawled text.
 5. **Structured JSON Output:** Formatted JSON payload containing all page records, titles, and crawl statistics.
@@ -100,10 +100,10 @@ Visit https://example.com and extract its company name, services, contact inform
 > **Speaker:**  
 > "The crawl has finished.  
 > Notice our new Evidence-Grounded Website Intelligence layer:  
-> First, it generates a direct natural-language answer to our question based strictly on verified crawler text.  
+> First, it generates a natural-language answer from crawled text. LLM responses must pass schema, source URL, exact quote, and lexical overlap checks; this is conservative validation, not a proof of semantic correctness.  
 > Second, it provides a structured Website Overview—explaining what the site represents, its primary purpose, categories, and relevance.  
-> Third, it extracts grounded entities—such as organizations and referenced protocols—with source citations.  
-> Fourth, it provides contextual findings, entity relationships, and honest limitations.  
+> Third, it reports heuristic entity candidates based on extracted metadata, structured fields, and a small protocol vocabulary, with source URLs.  
+> Fourth, it provides contextual crawl findings and limitations; it does not infer relationships merely because two entities co-occur.  
 > Fifth, it cites verifiable evidence with transparent confidence tags: 'supported', 'partially supported', or 'not found in the crawled content'—strictly avoiding hallucinated percentage scores.  
 > Below that is our verified extractive summary and the valid structured JSON output.  
 > In the Execution Details, we can see the exact tool executed—`site-crawler`—with an exit code of 0, running in 1.4 seconds, along with the actual stderr stream from the crawler.  
@@ -121,4 +121,4 @@ Visit https://example.com and extract its company name, services, contact inform
 > **Visual:** Opening the Task History drawer, showing past runs and theme toggle.  
 > **Speaker:**  
 > "Finally, let's open the Persistent Task History drawer. Every task, duration, and status is durably stored in SQLite. If the server were to crash or restart, our startup recovery engine automatically inspects interrupted jobs and flags them as interrupted rather than losing track of them.  
-> In summary, MAI-Chat is reliable, completely sandboxed, cross-platform, and fully verified by our automated test suite. Thank you."
+> In summary, MAI-Chat combines constrained CLI orchestration, crawler-side network protections, persistent task tracking, and evidence-checked website intelligence. It is not a kernel-sandboxed execution environment; child processes run with the server user's OS permissions. Thank you."
