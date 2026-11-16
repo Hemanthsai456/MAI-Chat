@@ -710,16 +710,25 @@ def _validate_llm_grounding(data: dict[str, Any], doc: dict[str, Any]) -> bool:
     if not _has_grounded_overlap(data.get("direct_answer", ""), all_corpus, 0.35):
         return False
 
+    overview = data.get("website_overview", {})
+    if not _has_grounded_overlap(overview.get("represents", ""), all_corpus, 0.35):
+        return False
+    if not _has_grounded_overlap(overview.get("purpose", ""), all_corpus, 0.35):
+        return False
+
     findings = data.get("contextual_findings", {}).get("findings", [])
     if any(not _has_grounded_overlap(str(item), all_corpus, 0.35) for item in findings):
         return False
 
-    # Named entities must occur in their cited page or in crawler structured data.
+    # Named entities and their descriptions must be anchored to their cited
+    # page or to the crawler's structured extraction output.
     for entity in data.get("entities", []):
         source_url = entity.get("source_url", "")
         name = entity.get("name", "").strip().casefold()
         if source_url not in page_corpora or not name:
             return False
         if name not in page_corpora[source_url].casefold() and name not in structured_text.casefold():
+            return False
+        if not _has_grounded_overlap(entity.get("description", ""), page_corpora[source_url] + " " + structured_text, 0.25):
             return False
     return True
