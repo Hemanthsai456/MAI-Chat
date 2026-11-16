@@ -116,9 +116,9 @@ MAI-Chat solves these issues through a strictly bounded, isolated, and audited e
 - **Structured Schema Extractor:** Evaluates pages against user-requested fields, using honest null representations (`null` / `(not found on page)`) rather than fabricating data.
 
 ### 2.6 Evidence-Grounded Website Intelligence (`app/intelligence.py`)
-- **Post-Execution Separation:** Invoked only after the crawler process has exited 0 and its JSON output has passed schema verification. The crawler has zero dependency on AI reasoning.
-- **Prompt Injection Defense:** Crawled page contents are encapsulated within strict `<crawled_evidence>` untrusted data boundaries. System instructions forbid the model from executing any commands found within the crawled text.
-- **Dual-Mode Synthesis:**
+- **Post-Execution Separation:** Runs after crawler output is parsed; partial page results may also be analyzed. The crawler has zero dependency on AI reasoning.
+- **Untrusted Input Handling:** Crawled page contents are wrapped in `<crawled_evidence>` delimiters and identified as untrusted. The intelligence module has no shell/CLI execution capability. Prompt delimiters are a mitigation, not a guarantee of model-level prompt-injection resistance.
+- **Evidence Validation:** LLM output must pass schema checks, use URLs belonging to crawled pages, provide supporting quotes found in the cited page text, and use entity names present in page text or extracted structured data. Lexical checks reduce obvious fabrication but do not prove semantic entailment.\n- **Dual-Mode Synthesis:**
   - *Offline Deterministic Engine:* Operates without an external API key. Uses rule-based sentence alignment, keyword matching, entity type heuristics, and heading taxonomies.
   - *Optional LLM Synthesis:* When `LLM_API_KEY` is present, formats a bounded prompt to generate natural-language answers and entity classifications.
 - **Fail-Safe Circuit Breaker:** Bounded by a 10.0-second network timeout and 32KB payload cap. If the LLM call times out, encounters a network error, or produces an invalid JSON schema, execution immediately falls back to the deterministic analysis without failing the crawl or discarding data.
