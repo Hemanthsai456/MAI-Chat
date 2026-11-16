@@ -531,19 +531,24 @@ class SecurityRemediationTests(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_15_cancellation_terminates_subprocess_tree(self):
         """User cancellation terminates the running subprocess tree promptly without hanging."""
+        sleep_script = Path(tempfile.mkdtemp()) / "sleeper.py"
+        sleep_script.write_text("import time\ntime.sleep(20)\n")
+        sleeper_tool = ApprovedTool("sleeper", sleep_script, "Sleeper for cancellation test", max_timeout_s=30.0)
+        register_tool(sleeper_tool)
+
         cancel_ev = threading.Event()
 
-        # Trigger cancellation after 0.2 seconds in a background thread
+        # Trigger cancellation after 0.1 seconds in a background thread
         def cancel_timer():
-            time.sleep(0.2)
+            time.sleep(0.1)
             cancel_ev.set()
 
         threading.Thread(target=cancel_timer, daemon=True).start()
 
         start = time.monotonic()
         res = run_approved_tool(
-            "site-crawler",
-            ["--url=https://example.com", "--timeout=10"],
+            "sleeper",
+            [],
             timeout_s=30.0,
             cancel_event=cancel_ev,
         )
