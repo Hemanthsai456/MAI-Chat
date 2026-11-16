@@ -430,7 +430,7 @@ class IntelligenceTests(unittest.TestCase):
             "entities": [{
                 "name": "Example Domain Registry",
                 "type": "Organization",
-                "description": "A named entity in the crawler structured data.",
+                "description": "Example Domain Registry is the company name.",
                 "relevance": "Explicitly extracted from structured data.",
                 "source_url": "https://example.com",
             }],
