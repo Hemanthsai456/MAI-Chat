@@ -23,10 +23,16 @@ Or click the primary example chip: **★ Mandatory Demo (example.com)**.
 1. **Interpretation & Plan:** The chat displays the parsed target URL, page limit, and execution steps.
 2. **10-Stage Real Execution Pipeline:** Watch the stage visualizer progress through:
    - `Request received` → `Intent interpreted` → `Plan prepared` → `Input validated` → `Approved CLI selected` → `CLI process started` → `Execution running` → `Output captured` → `Result validated` → `Task completed`.
-3. **Verified Summary:** A clean, accurate extractive summary synthesized directly from crawled text.
-4. **Structured JSON Output:** Formatted JSON payload containing all page records, titles, and crawl statistics.
-5. **Execution Details Accordion:** Click *Execution Details & Verified Logs* to verify the real exit code (`0`), tool name (`site-crawler`), CLI duration, and captured stderr trail.
-6. **Export Actions:** Click **Download JSON**, **Download Markdown**, or **Export CSV** to verify instant file generation.
+3. **Evidence-Grounded Intelligence Cards:**
+   - **Direct Answer:** A clear, natural-language answer to the user's inquiry grounded directly in crawled text.
+   - **Website Overview:** Explains what the site represents, its purpose, categories, and relevance to the query.
+   - **Relevant Entities:** Structured cards showing detected entities (Organization, Technology, Service) with descriptions and source links.
+   - **Contextual Findings:** Key findings, relationships, answers to questions, limitations, and unsupported conclusions.
+   - **Evidence & Limitations:** Bounded citations with supporting quotes and transparent confidence tags (`supported`, `partially supported`, `not found in the crawled content`).
+4. **Verified Summary:** A clean, accurate extractive summary synthesized directly from crawled text.
+5. **Structured JSON Output:** Formatted JSON payload containing all page records, titles, and crawl statistics.
+6. **Execution Details Accordion:** Click *Execution Details & Verified Logs* to verify the real exit code (`0`), tool name (`site-crawler`), CLI duration, and captured stderr trail.
+7. **Export Actions:** Click **Download JSON**, **Download Markdown**, or **Export CSV** to verify instant file generation.
 
 ---
 
@@ -89,14 +95,19 @@ Visit https://example.com and extract its company name, services, contact inform
 > The backend parses the intent and generates a 5-step plan.  
 > Look at our real-time 10-stage execution visualizer: it tracks real backend events—from URL validation and tool selection, to subprocess launch and streaming output capture."
 
-### [2:45 – 4:00] Verification of Live Results & Exports
-> **Visual:** Scrolling through the green success banner, the summary, and the JSON code block. Opening the Execution Details accordion.  
+### [2:45 – 4:00] Verification of Live Results, Grounded Intelligence & Exports
+> **Visual:** Scrolling through the green success banner, the Evidence-Grounded Intelligence cards (Direct Answer, Website Overview, Entities, Findings, Evidence), the summary, and the JSON code block. Opening the Execution Details accordion.  
 > **Speaker:**  
 > "The crawl has finished.  
-> Here is the verified extractive summary: it read 1 page on example.com with 25 words, opened with the exact documentation disclaimer, and clearly states: 'Summary method: extractive; no language model was used'.  
-> Below is the valid structured JSON output.  
+> Notice our new Evidence-Grounded Website Intelligence layer:  
+> First, it generates a direct natural-language answer to our question based strictly on verified crawler text.  
+> Second, it provides a structured Website Overview—explaining what the site represents, its primary purpose, categories, and relevance.  
+> Third, it extracts grounded entities—such as organizations and referenced protocols—with source citations.  
+> Fourth, it provides contextual findings, entity relationships, and honest limitations.  
+> Fifth, it cites verifiable evidence with transparent confidence tags: 'supported', 'partially supported', or 'not found in the crawled content'—strictly avoiding hallucinated percentage scores.  
+> Below that is our verified extractive summary and the valid structured JSON output.  
 > In the Execution Details, we can see the exact tool executed—`site-crawler`—with an exit code of 0, running in 1.4 seconds, along with the actual stderr stream from the crawler.  
-> With one click, users can Copy JSON, Download JSON, Download a formatted Markdown report, or Export CSV."
+> With one click, users can Copy JSON, Download JSON, Download a formatted Markdown report (which includes all intelligence sections), or Export CSV."
 
 ### [4:00 – 5:00] Failure Handling & Security Controls
 > **Visual:** Clicking the 'Unreachable Host' example, then demonstrating task history.  

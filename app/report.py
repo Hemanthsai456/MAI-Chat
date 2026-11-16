@@ -7,11 +7,15 @@ Everything else is reported as partial, failed, timed out or cancelled, with the
 from __future__ import annotations
 
 import json
+import logging
 import urllib.parse
 from typing import Any
 
+from .intelligence import generate_intelligence
 from .intent import Intent
 from .runner import CliResult
+
+log = logging.getLogger("buildsprint.report")
 
 SUCCEEDED = "succeeded"
 PARTIAL = "partial"
@@ -66,7 +70,7 @@ def parse_crawler_output(stdout: str) -> dict[str, Any]:
     return doc
 
 
-def build_result(intent: Intent, cli: CliResult) -> dict[str, Any]:
+def build_result(intent: Intent, cli: CliResult, original_prompt: str | None = None) -> dict[str, Any]:
     execution = {
         "tool": cli.tool,
         "args": cli.args,
@@ -102,16 +106,32 @@ def build_result(intent: Intent, cli: CliResult) -> dict[str, Any]:
             execution=execution,
         )
 
+    question = original_prompt or intent.describe()
+
     if cli.exit_code != 0 or doc["status"] in ("blocked", "failed"):
+        intel = None
+        try:
+            intel = generate_intelligence(question, doc)
+        except Exception as exc:
+            log.warning("Intelligence generation on failed crawl encountered error: %s", exc)
         return build_message(
             FAILED, "error",
             f"Task failed: {_failure_reason(doc, cli.exit_code)}.",
             errors=doc["errors"],
             execution=execution,
+            intelligence=intel,
         )
 
     status = SUCCEEDED if doc["status"] == "success" else PARTIAL
-    payload = _payload(intent, status, doc, execution)
+
+    # Generate evidence-grounded intelligence
+    intel = None
+    try:
+        intel = generate_intelligence(question, doc)
+    except Exception as exc:
+        log.warning("Intelligence generation on successful crawl encountered error: %s", exc)
+
+    payload = _payload(intent, status, doc, execution, intelligence=intel)
     pages_read = len(doc["pages"])
     if status == SUCCEEDED:
         kind = "success"
@@ -128,6 +148,7 @@ def build_result(intent: Intent, cli: CliResult) -> dict[str, Any]:
         payload=payload,
         errors=doc["errors"],
         execution=execution,
+        intelligence=intel,
     )
 
 
@@ -140,19 +161,29 @@ def build_message(
     payload: dict[str, Any] | None = None,
     errors: list[dict] | None = None,
     execution: dict[str, Any] | None = None,
+    intelligence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     json_text = None
     if payload is not None:
         json_text = json.dumps(payload, ensure_ascii=False, indent=2)
         json.loads(json_text)  # guarantee that what the user sees is valid JSON
-    return {
+    msg: dict[str, Any] = {
         "task_status": status,
         "banner": {"kind": kind, "text": text},
         "summary": summary,
         "json": json_text,
+        "payload": payload,
         "errors": errors or [],
         "execution": execution or {},
     }
+    if intelligence:
+        msg["intelligence"] = intelligence
+        msg["answer"] = intelligence.get("direct_answer")
+        msg["overview"] = intelligence.get("website_overview")
+        msg["entities"] = intelligence.get("entities")
+        msg["findings"] = intelligence.get("contextual_findings")
+        msg["evidence"] = intelligence.get("evidence")
+    return msg
 
 
 def _failure_reason(doc: dict[str, Any], exit_code: int | None) -> str:
@@ -163,13 +194,19 @@ def _failure_reason(doc: dict[str, Any], exit_code: int | None) -> str:
     return f"the crawler exited with code {exit_code}"
 
 
-def _payload(intent: Intent, status: str, doc: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+def _payload(
+    intent: Intent,
+    status: str,
+    doc: dict[str, Any],
+    execution: dict[str, Any],
+    intelligence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     pages = doc["pages"]
     host = urllib.parse.urlsplit(intent.url).hostname or ""
     sections = _sections(pages)
     description = next((p["meta_description"] for p in pages if p["meta_description"]), "")
     structured_data = doc.get("structured_data", {})
-    return {
+    payload_data: dict[str, Any] = {
         "task": intent.task_type,
         "status": status,
         "input": {"url": intent.url, "max_pages": intent.max_pages},
@@ -200,6 +237,9 @@ def _payload(intent: Intent, status: str, doc: dict[str, Any], execution: dict[s
         "crawl_stats": doc.get("stats", {}),
         "execution": {k: v for k, v in execution.items() if k != "stderr_tail"},
     }
+    if intelligence:
+        payload_data["intelligence"] = intelligence
+    return payload_data
 
 
 def _sections(pages: list[dict[str, Any]]) -> list[str]:

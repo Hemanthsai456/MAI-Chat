@@ -127,6 +127,191 @@
     }
   }
 
+  function renderDirectAnswer(container, intel) {
+    if (!intel || !intel.direct_answer) return;
+    const card = make("div", "intel-card direct-answer");
+    const header = make("div", "intel-header");
+    const title = make("h4", "intel-title", "Direct Answer");
+    header.appendChild(title);
+
+    const pillText = intel.generator === "llm" ? `AI Synthesis (${intel.model || "LLM"})` : "Deterministic Grounded";
+    const pill = make("span", "intel-pill grounded", pillText);
+    header.appendChild(pill);
+    card.appendChild(header);
+
+    const p = make("p", "direct-answer-text", intel.direct_answer);
+    card.appendChild(p);
+    container.appendChild(card);
+  }
+
+  function renderWebsiteOverview(container, overview) {
+    if (!overview) return;
+    const card = make("div", "intel-card website-overview");
+    const header = make("div", "intel-header");
+    const title = make("h4", "intel-title", "Website Overview");
+    header.appendChild(title);
+
+    if (overview.relevance_status) {
+      const relLabel = overview.relevance_status.replace(/_/g, " ");
+      const relPill = make("span", `intel-pill ${overview.relevance_status}`, relLabel);
+      header.appendChild(relPill);
+    }
+    card.appendChild(header);
+
+    const grid = make("div", "overview-grid");
+
+    // Represents
+    const repField = make("div", "overview-field");
+    repField.appendChild(make("span", "overview-label", "Represents"));
+    repField.appendChild(make("span", "overview-val", overview.represents || "N/A"));
+    grid.appendChild(repField);
+
+    // Purpose
+    const purpField = make("div", "overview-field");
+    purpField.appendChild(make("span", "overview-label", "Primary Purpose"));
+    purpField.appendChild(make("span", "overview-val", overview.purpose || "N/A"));
+    grid.appendChild(purpField);
+
+    // Relevance
+    const relField = make("div", "overview-field");
+    relField.appendChild(make("span", "overview-label", "Relevance to Question"));
+    relField.appendChild(make("span", "overview-val", overview.relevance || "N/A"));
+    grid.appendChild(relField);
+
+    // Categories
+    if (overview.categories && overview.categories.length) {
+      const catField = make("div", "overview-field");
+      catField.appendChild(make("span", "overview-label", "Content Categories"));
+      const catWrap = make("div", "categories-wrap");
+      for (const cat of overview.categories) {
+        catWrap.appendChild(make("span", "category-tag", cat));
+      }
+      catField.appendChild(catWrap);
+      grid.appendChild(catField);
+    }
+
+    card.appendChild(grid);
+    container.appendChild(card);
+  }
+
+  function renderEntities(container, entities) {
+    if (!entities || !entities.length) return;
+    const card = make("div", "intel-card entities-section");
+    const header = make("div", "intel-header");
+    const title = make("h4", "intel-title", `Relevant Entities (${entities.length})`);
+    header.appendChild(title);
+    card.appendChild(header);
+
+    const grid = make("div", "entities-grid");
+    for (const ent of entities) {
+      const eCard = make("div", "entity-card");
+      const eHeader = make("div", "entity-header");
+      eHeader.appendChild(make("span", "entity-name", ent.name));
+      if (ent.type) {
+        eHeader.appendChild(make("span", "entity-badge", ent.type));
+      }
+      eCard.appendChild(eHeader);
+
+      if (ent.description) {
+        eCard.appendChild(make("p", "entity-desc", ent.description));
+      }
+      if (ent.relevance) {
+        eCard.appendChild(make("p", "entity-relevance", ent.relevance));
+      }
+      if (ent.source_url) {
+        const link = make("a", "entity-source", ent.source_url);
+        link.href = ent.source_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        eCard.appendChild(link);
+      }
+      grid.appendChild(eCard);
+    }
+    card.appendChild(grid);
+    container.appendChild(card);
+  }
+
+  function renderContextualFindings(container, findingsObj) {
+    if (!findingsObj) return;
+    const card = make("div", "intel-card contextual-findings");
+    const header = make("div", "intel-header");
+    header.appendChild(make("h4", "intel-title", "Contextual Findings"));
+    card.appendChild(header);
+
+    if (findingsObj.findings && findingsObj.findings.length) {
+      card.appendChild(make("div", "overview-label", "Key Discoveries"));
+      const ul = make("ul", "findings-list");
+      for (const item of findingsObj.findings) {
+        ul.appendChild(make("li", "", item));
+      }
+      card.appendChild(ul);
+    }
+
+    if (findingsObj.relationships && findingsObj.relationships.length) {
+      card.appendChild(make("div", "overview-label", "Entity Relationships"));
+      const ul = make("ul", "relationships-list");
+      for (const rel of findingsObj.relationships) {
+        ul.appendChild(make("li", "", rel));
+      }
+      card.appendChild(ul);
+    }
+
+    if ((findingsObj.limitations && findingsObj.limitations.length) || (findingsObj.unsupported_conclusions && findingsObj.unsupported_conclusions.length)) {
+      const limBox = make("div", "limitations-box");
+      limBox.appendChild(make("h4", "", "Limitations & Unsupported Conclusions"));
+      const ul = make("ul");
+      if (findingsObj.limitations) {
+        for (const lim of findingsObj.limitations) {
+          ul.appendChild(make("li", "", lim));
+        }
+      }
+      if (findingsObj.unsupported_conclusions) {
+        for (const uns of findingsObj.unsupported_conclusions) {
+          ul.appendChild(make("li", "", `Unsupported: ${uns}`));
+        }
+      }
+      limBox.appendChild(ul);
+      card.appendChild(limBox);
+    }
+
+    container.appendChild(card);
+  }
+
+  function renderEvidence(container, evidenceList) {
+    if (!evidenceList || !evidenceList.length) return;
+    const card = make("div", "intel-card evidence-section");
+    const header = make("div", "intel-header");
+    header.appendChild(make("h4", "intel-title", "Evidence & Limitations"));
+    header.appendChild(make("span", "intel-pill", `${evidenceList.length} Grounded Citations`));
+    card.appendChild(header);
+
+    const grid = make("div", "evidence-grid");
+    for (const ev of evidenceList) {
+      const evCard = make("div", "evidence-card");
+      const evHead = make("div", "evidence-card-header");
+      evHead.appendChild(make("span", "evidence-claim", ev.claim));
+
+      const confSlug = (ev.confidence || "supported").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const tag = make("span", `confidence-tag ${confSlug}`, ev.confidence || "supported");
+      evHead.appendChild(tag);
+      evCard.appendChild(evHead);
+
+      if (ev.supporting_text) {
+        evCard.appendChild(make("blockquote", "evidence-quote", `"${ev.supporting_text}"`));
+      }
+      if (ev.source_url) {
+        const link = make("a", "evidence-source-url", `Source: ${ev.source_url}`);
+        link.href = ev.source_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        evCard.appendChild(link);
+      }
+      grid.appendChild(evCard);
+    }
+    card.appendChild(grid);
+    container.appendChild(card);
+  }
+
   function renderFinalResult(bubble, task, lead) {
     bubble.replaceChildren();
     const result = task.result || {};
@@ -145,16 +330,39 @@
       renderStages(bubble, task.stages);
     }
 
-    // Summary
-    if (result.summary) {
-      bubble.appendChild(make("h3", "", "Verified Extractive Summary"));
-      bubble.appendChild(make("div", "prose", result.summary));
+    // Evidence-Grounded Intelligence (Direct Answer, Overview, Entities, Findings, Evidence)
+    const intel = result.intelligence || null;
+    if (intel) {
+      const intelSection = make("div", "intel-section");
+      renderDirectAnswer(intelSection, intel);
+      renderWebsiteOverview(intelSection, intel.website_overview || result.overview);
+      renderEntities(intelSection, intel.entities || result.entities);
+      renderContextualFindings(intelSection, intel.contextual_findings || result.findings);
+      renderEvidence(intelSection, intel.evidence || result.evidence);
+      bubble.appendChild(intelSection);
+    } else if (result.answer) {
+      const intelSection = make("div", "intel-section");
+      renderDirectAnswer(intelSection, { direct_answer: result.answer, generator: "deterministic" });
+      renderWebsiteOverview(intelSection, result.overview);
+      renderEntities(intelSection, result.entities);
+      renderContextualFindings(intelSection, result.findings);
+      renderEvidence(intelSection, result.evidence);
+      bubble.appendChild(intelSection);
     }
 
-    // Structured JSON
+    // Verified Extractive Summary
+    if (result.summary) {
+      const sumCard = make("div", "intel-card");
+      sumCard.appendChild(make("h4", "intel-title", "Verified Extractive Summary"));
+      sumCard.appendChild(make("div", "prose", result.summary));
+      bubble.appendChild(sumCard);
+    }
+
+    // Structured JSON Output
     if (result.json) {
-      const h3 = make("h3", "", "Structured JSON Output");
-      bubble.appendChild(h3);
+      const jsonCard = make("div", "intel-card");
+      const h3 = make("h4", "intel-title", "Structured JSON Output");
+      jsonCard.appendChild(h3);
 
       // Action toolbar: Copy, Download JSON, Download Markdown, Export CSV
       const toolbar = make("div", "action-toolbar");
@@ -187,13 +395,14 @@
       exportCsv.setAttribute("download", `task_${task.id.slice(0, 8)}.csv`);
       toolbar.appendChild(exportCsv);
 
-      bubble.appendChild(toolbar);
+      jsonCard.appendChild(toolbar);
 
       const wrap = make("div", "code-wrap");
       const pre = make("pre", "code");
       pre.appendChild(make("code", "", result.json));
       wrap.appendChild(pre);
-      bubble.appendChild(wrap);
+      jsonCard.appendChild(wrap);
+      bubble.appendChild(jsonCard);
     }
 
     // Errors

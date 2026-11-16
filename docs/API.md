@@ -161,6 +161,47 @@ Polls task status, real-time 10-stage execution pipeline, progress log, and fina
     "task_status": "succeeded",
     "banner": {"kind": "success", "text": "Task succeeded: the crawler read 1 page(s) and returned valid JSON."},
     "summary": "Read 1 page(s) on example.com (about 25 words).\nFirst page title: \"Example Domain\".\nOpening text: This domain is for use in documentation examples...\nSummary method: extractive (built from the crawled text; no language model was used).",
+    "answer": "Successfully crawled example.com across 1 page(s). The site represents 'Example Domain'...",
+    "overview": {
+      "represents": "Example Domain",
+      "purpose": "This domain is established to be used for illustrative examples in documents...",
+      "categories": ["Documentation & Standards"],
+      "relevance": "The website content directly addresses topics and terms present in your query regarding example.com.",
+      "relevance_status": "relevant"
+    },
+    "entities": [
+      {
+        "name": "Example Domain Authority",
+        "type": "Organization",
+        "description": "Subject of the website at example.com",
+        "relevance": "Primary entity and subject of the crawled domain.",
+        "source_url": "https://example.com"
+      }
+    ],
+    "findings": {
+      "findings": ["Retrieved 1 page(s) totaling 25 words from https://example.com."],
+      "relationships": ["Content on this site focuses centrally on Example Domain."],
+      "answers_question": "Directly answers the query using extracted text.",
+      "limitations": ["Evidence is strictly bounded to 1 crawled page(s)."],
+      "unsupported_conclusions": ["Cannot verify claims not published directly within crawled pages."]
+    },
+    "evidence": [
+      {
+        "claim": "Primary content of Example Domain",
+        "source_url": "https://example.com",
+        "supporting_text": "This domain is for use in documentation examples...",
+        "confidence": "supported"
+      }
+    ],
+    "intelligence": {
+      "direct_answer": "...",
+      "website_overview": {...},
+      "entities": [...],
+      "contextual_findings": {...},
+      "evidence": [...],
+      "generator": "deterministic",
+      "model": null
+    },
     "json": "{\n  \"task\": \"website_crawl\",\n  \"status\": \"succeeded\",\n  \"pages\": [...]\n}",
     "errors": [],
     "execution": {

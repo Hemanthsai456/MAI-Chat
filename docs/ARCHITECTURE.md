@@ -115,6 +115,15 @@ MAI-Chat solves these issues through a strictly bounded, isolated, and audited e
 - **Comprehensive Content Extraction:** Extracts page title, meta description, meta keywords, canonical tags, all headings H1–H6, word counts, and separates internal vs. external links.
 - **Structured Schema Extractor:** Evaluates pages against user-requested fields, using honest null representations (`null` / `(not found on page)`) rather than fabricating data.
 
+### 2.6 Evidence-Grounded Website Intelligence (`app/intelligence.py`)
+- **Post-Execution Separation:** Invoked only after the crawler process has exited 0 and its JSON output has passed schema verification. The crawler has zero dependency on AI reasoning.
+- **Prompt Injection Defense:** Crawled page contents are encapsulated within strict `<crawled_evidence>` untrusted data boundaries. System instructions forbid the model from executing any commands found within the crawled text.
+- **Dual-Mode Synthesis:**
+  - *Offline Deterministic Engine:* Operates without an external API key. Uses rule-based sentence alignment, keyword matching, entity type heuristics, and heading taxonomies.
+  - *Optional LLM Synthesis:* When `LLM_API_KEY` is present, formats a bounded prompt to generate natural-language answers and entity classifications.
+- **Fail-Safe Circuit Breaker:** Bounded by a 10.0-second network timeout and 32KB payload cap. If the LLM call times out, encounters a network error, or produces an invalid JSON schema, execution immediately falls back to the deterministic analysis without failing the crawl or discarding data.
+- **Transparent Grounding:** Categorizes all confidence strictly into `"supported"`, `"partially supported"`, or `"not found in the crawled content"`. Hallucinated percentage scores and calibrated probabilities are forbidden.
+
 ---
 
 ## 3. Tool-Extension Architecture

@@ -341,12 +341,21 @@ class TaskManager:
         fmt = fmt.lower().strip()
         task_id_short = task.id[:8]
 
+        payload = None
+        if task.result:
+            payload = task.result.get("payload")
+            if not payload and task.result.get("json"):
+                try:
+                    payload = json.loads(task.result["json"])
+                except Exception:
+                    payload = None
+
         if fmt == "csv":
             output = io.StringIO()
             writer = csv.writer(output)
             writer.writerow(["Page URL", "Title", "Word Count", "Status Code", "Headings"])
-            if task.result and "payload" in task.result and "pages" in task.result["payload"]:
-                for p in task.result["payload"]["pages"]:
+            if payload and isinstance(payload, dict) and "pages" in payload:
+                for p in payload["pages"]:
                     headings_str = " | ".join(p.get("headings", []))
                     writer.writerow([
                         p.get("url", ""),
@@ -364,10 +373,54 @@ class TaskManager:
                 f"**Status:** {task.status.upper()}  ",
                 f"**Created At:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(task.created_at))}  ",
                 "",
+            ]
+            intel = task.result.get("intelligence") if task.result else None
+            if intel:
+                lines.extend([
+                    "## Direct Answer",
+                    intel.get("direct_answer", "N/A"),
+                    "",
+                    "## Website Overview",
+                    f"- **Represents:** {intel.get('website_overview', {}).get('represents', 'N/A')}",
+                    f"- **Purpose:** {intel.get('website_overview', {}).get('purpose', 'N/A')}",
+                    f"- **Relevance:** {intel.get('website_overview', {}).get('relevance', 'N/A')}",
+                    f"- **Categories:** {', '.join(intel.get('website_overview', {}).get('categories', []))}",
+                    "",
+                ])
+                entities = intel.get("entities", [])
+                if entities:
+                    lines.extend(["## Relevant Entities", ""])
+                    for ent in entities:
+                        lines.append(f"- **{ent.get('name')}** (`{ent.get('type')}`): {ent.get('description')} *(Source: {ent.get('source_url')})*")
+                    lines.append("")
+
+                contextual = intel.get("contextual_findings", {})
+                if contextual:
+                    lines.extend(["## Contextual Findings", ""])
+                    for f in contextual.get("findings", []):
+                        lines.append(f"- {f}")
+                    if contextual.get("limitations"):
+                        lines.extend(["", "### Limitations", ""])
+                        for lim in contextual.get("limitations", []):
+                            lines.append(f"- {lim}")
+                    if contextual.get("unsupported_conclusions"):
+                        lines.extend(["", "### Unsupported Conclusions", ""])
+                        for uns in contextual.get("unsupported_conclusions", []):
+                            lines.append(f"- {uns}")
+                    lines.append("")
+
+                evidence_items = intel.get("evidence", [])
+                if evidence_items:
+                    lines.extend(["## Evidence & Confidence", ""])
+                    for ev in evidence_items:
+                        lines.append(f"- **Claim:** {ev.get('claim')}  \n  **Confidence:** {ev.get('confidence')}  \n  **Quote:** \"{ev.get('supporting_text')}\"  \n  **Source:** {ev.get('source_url')}")
+                    lines.append("")
+
+            lines.extend([
                 "## Summary",
                 task.result.get("summary", "No summary available.") if task.result else "No result generated.",
                 "",
-            ]
+            ])
             if task.result and task.result.get("errors"):
                 lines.extend(["## Errors Encountered", ""])
                 for err in task.result["errors"]:
@@ -548,7 +601,7 @@ class TaskManager:
             self._update(task, note=f"Crawler exited with code {cli.exit_code} after {cli.duration_s}s")
 
             self._set_stage(task, "result_validated", "active", "Validating crawler JSON document")
-            res = build_result(task.intent, cli)
+            res = build_result(task.intent, cli, original_prompt=task.prompt)
             self._set_stage(task, "result_validated", "completed", "JSON schema and page structures verified")
 
             self._finish(task, res, exit_code=cli.exit_code, duration_s=cli.duration_s)
