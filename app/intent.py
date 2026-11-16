@@ -25,6 +25,7 @@ from .validation import ValidationError, normalise_url
 log = logging.getLogger("buildsprint.intent")
 
 TASK_CRAWL = "website_crawl"
+TASK_FOLLOWUP = "thread_followup"
 DEFAULT_PAGES = 5
 MAX_PAGES = 10
 MAX_DEPTH = 3
@@ -82,6 +83,9 @@ class Intent:
     plan: TaskPlan | None = None
 
     def describe(self) -> str:
+        if self.task_type == TASK_FOLLOWUP:
+            q = self.notes[0] if self.notes else "Follow-up question"
+            return f"Answer follow-up question from stored crawl of {self.url}: '{q}'"
         fields_desc = ""
         if self.plan and self.plan.extraction_fields:
             fields_desc = f", extract specific fields ({', '.join(self.plan.extraction_fields)})"
@@ -307,3 +311,64 @@ def parse_intent(prompt: object) -> Intent:
 
     # Deterministic rule-based parsing
     return _parse_with_rules(text)
+
+
+@dataclass(frozen=True)
+class FollowupIntent:
+    """Follow-up question intent for threads with stored crawl memory."""
+    question: str
+    task_type: str = TASK_FOLLOWUP
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """Routing decision for thread messages."""
+    action: str  # 'crawl' | 'followup' | 'needs_url'
+    intent: Intent | None = None
+    question: str | None = None
+    message: str | None = None
+
+
+def parse_followup(prompt: str) -> FollowupIntent:
+    """Parse a follow-up question within a thread having crawl memory."""
+    text = (prompt or "").strip()
+    if not text:
+        raise IntentError("Prompt cannot be empty.")
+    if len(text) > 1000:
+        raise IntentError("Prompt is too long (maximum 1000 characters).")
+    return FollowupIntent(question=text)
+
+
+def route_thread_message(prompt: str, thread_context: dict[str, Any] | None) -> RouteDecision:
+    """Route a thread message to crawl, followup, or needs_url.
+
+    Rules:
+    - Empty or >1000 chars: raises IntentError (400 rejection).
+    - Prompt contains a valid URL: route to crawl.
+    - No URL and thread has crawl_doc: route to followup.
+    - No URL and thread has no crawl_doc: route to needs_url.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        raise IntentError("Prompt cannot be empty.")
+    if len(text) > 1000:
+        raise IntentError("Prompt is too long (maximum 1000 characters).")
+
+    raw_url = extract_url(text)
+    if raw_url is not None:
+        # Prompt contains a URL attempt; parse with parse_intent (which validates the URL)
+        crawl_intent = parse_intent(text)
+        return RouteDecision(action="crawl", intent=crawl_intent)
+
+    ctx = thread_context or {}
+    has_crawl_doc = bool(ctx.get("crawl_doc"))
+
+    if has_crawl_doc:
+        followup_intent = parse_followup(text)
+        return RouteDecision(action="followup", question=followup_intent.question)
+
+    return RouteDecision(
+        action="needs_url",
+        message="Give me a website to work on first, e.g. Crawl https://example.com.",
+    )

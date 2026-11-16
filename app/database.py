@@ -11,6 +11,8 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.parse
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator
@@ -39,6 +41,7 @@ class TaskRecord:
     error_json: str | None = None
     progress_json: str = "[]"
     stages_json: str = "[]"
+    thread_id: str | None = None
 
     @property
     def intent(self) -> dict[str, Any]:
@@ -113,14 +116,51 @@ def _migration_v1(conn: sqlite3.Connection) -> None:
 def _migration_v2(conn: sqlite3.Connection) -> None:
     """Version 2: Add stages_json column to tasks table for timeline persistence."""
     cursor = conn.execute("PRAGMA table_info(tasks)")
-    columns = [row["name"] for row in cursor.fetchall()]
+    columns = [row[1] for row in cursor.fetchall()]
     if "stages_json" not in columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN stages_json TEXT NOT NULL DEFAULT '[]'")
+
+
+def _migration_v3(conn: sqlite3.Connection) -> None:
+    """Version 3: Add conversation threads, thread messages, and thread_id on tasks."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS threads (
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL DEFAULT '',
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL,
+            context_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC)")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS thread_messages (
+            id          TEXT PRIMARY KEY,
+            thread_id   TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            role        TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content     TEXT NOT NULL,
+            task_id     TEXT,
+            created_at  REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_thread ON thread_messages(thread_id, created_at)")
+
+    cursor = conn.execute("PRAGMA table_info(tasks)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "thread_id" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN thread_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_thread_id ON tasks(thread_id)")
 
 
 MIGRATIONS = [
     (1, "Create base tasks table and indexes", _migration_v1),
     (2, "Add stages_json column for historical stage timeline persistence", _migration_v2),
+    (3, "Add conversation threads and thread messages", _migration_v3),
 ]
 
 
@@ -138,6 +178,7 @@ class Database:
         if str(self.db_path) == ":memory:":
             self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
             self._mem_conn.row_factory = sqlite3.Row
+            self._mem_conn.execute("PRAGMA foreign_keys = ON")
         else:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -156,6 +197,7 @@ class Database:
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         """Context manager that ensures connections and file handles are safely managed."""
         if self._mem_conn is not None:
+            self._mem_conn.execute("PRAGMA foreign_keys = ON")
             yield self._mem_conn
             return
 
@@ -167,6 +209,7 @@ class Database:
         )
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
             yield conn
@@ -273,8 +316,8 @@ class Database:
                 INSERT OR REPLACE INTO tasks (
                     id, prompt, task_type, target_url, status, tool,
                     created_at, started_at, completed_at, duration_s, exit_code,
-                    intent_json, plan_json, result_json, error_json, progress_json, stages_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    intent_json, plan_json, result_json, error_json, progress_json, stages_json, thread_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -294,6 +337,7 @@ class Database:
                     record.error_json,
                     record.progress_json,
                     record.stages_json,
+                    record.thread_id,
                 ),
             )
 
@@ -407,6 +451,7 @@ class Database:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if not row:
                 return None
+            keys = row.keys()
             return TaskRecord(
                 id=row["id"],
                 prompt=row["prompt"],
@@ -424,7 +469,8 @@ class Database:
                 result_json=row["result_json"],
                 error_json=row["error_json"],
                 progress_json=row["progress_json"],
-                stages_json=row["stages_json"] if "stages_json" in row.keys() else "[]",
+                stages_json=row["stages_json"] if "stages_json" in keys else "[]",
+                thread_id=row["thread_id"] if "thread_id" in keys else None,
             )
 
     def list_tasks(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -432,7 +478,7 @@ class Database:
             cursor = conn.execute(
                 """
                 SELECT id, prompt, task_type, target_url, status, tool,
-                       created_at, started_at, completed_at, duration_s, exit_code
+                       created_at, started_at, completed_at, duration_s, exit_code, thread_id
                 FROM tasks
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
@@ -453,5 +499,181 @@ class Database:
                     "completed_at": r["completed_at"],
                     "duration_s": r["duration_s"],
                     "exit_code": r["exit_code"],
+                    "thread_id": r["thread_id"] if "thread_id" in r.keys() else None,
                 })
             return results
+
+    # -----------------------------------------------------------------------
+    # Conversation Threads & Thread Messages
+    # -----------------------------------------------------------------------
+
+    def create_thread(self, thread_id: str, title: str = "", now: float | None = None) -> None:
+        """Create a new conversation thread."""
+        now = now if now is not None else time.time()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO threads (id, title, created_at, updated_at, context_json)
+                VALUES (?, ?, ?, ?, '{}')
+                """,
+                (thread_id, (title or "")[:80], now, now),
+            )
+
+    def list_threads(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List threads with message count and target URL ordered by updated_at DESC."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT t.id, t.title, t.created_at, t.updated_at, t.context_json,
+                       (SELECT COUNT(*) FROM thread_messages m WHERE m.thread_id = t.id) AS message_count
+                FROM threads t
+                ORDER BY t.updated_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (min(max(limit, 1), 200), max(offset, 0)),
+            )
+            results = []
+            for r in cursor.fetchall():
+                context = {}
+                try:
+                    context = json.loads(r["context_json"])
+                except Exception:
+                    pass
+                results.append({
+                    "id": r["id"],
+                    "title": r["title"],
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "message_count": r["message_count"],
+                    "target_url": context.get("target_url", ""),
+                })
+            return results
+
+    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        """Retrieve thread metadata, parsed crawl memory context, and message count."""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT t.id, t.title, t.created_at, t.updated_at, t.context_json,
+                       (SELECT COUNT(*) FROM thread_messages m WHERE m.thread_id = t.id) AS message_count
+                FROM threads t
+                WHERE t.id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+            if not row:
+                return None
+            context = {}
+            try:
+                context = json.loads(row["context_json"])
+            except Exception:
+                pass
+            return {
+                "id": row["id"],
+                "title": row["title"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "message_count": row["message_count"],
+                "target_url": context.get("target_url", ""),
+                "context": context,
+                "has_crawl_memory": bool(context.get("crawl_doc")),
+            }
+
+    def delete_thread(self, thread_id: str) -> bool:
+        """Delete thread and cascade-delete its messages."""
+        with self._connection() as conn:
+            cursor = conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+            return cursor.rowcount > 0
+
+    def update_thread_title(self, thread_id: str, title: str, now: float | None = None) -> None:
+        """Update thread title."""
+        now = now if now is not None else time.time()
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE threads SET title = ?, updated_at = ? WHERE id = ?",
+                ((title or "")[:80], now, thread_id),
+            )
+
+    def update_thread_context(self, thread_id: str, context: dict, now: float | None = None) -> None:
+        """Update thread crawl memory context under bounded memory limits."""
+        now = now if now is not None else time.time()
+        cleaned_context = dict(context)
+
+        # Enforce crawl_doc 2MB cap
+        if "crawl_doc" in cleaned_context and cleaned_context["crawl_doc"]:
+            try:
+                raw_json = json.dumps(cleaned_context["crawl_doc"], ensure_ascii=False)
+                if len(raw_json.encode("utf-8")) > 2_000_000:
+                    cleaned_context["crawl_doc"] = None
+                    cleaned_context["crawl_doc_oversized"] = True
+            except Exception:
+                pass
+
+        # Cap history at last 20 entries, each content <= 1000 chars
+        if "history" in cleaned_context and isinstance(cleaned_context["history"], list):
+            capped = []
+            for item in cleaned_context["history"][-20:]:
+                if isinstance(item, dict):
+                    capped.append({
+                        "role": str(item.get("role", "user")),
+                        "content": str(item.get("content", ""))[:1000],
+                    })
+            cleaned_context["history"] = capped
+
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE threads SET context_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(cleaned_context), now, thread_id),
+            )
+
+    def add_thread_message(
+        self,
+        message_id: str,
+        thread_id: str,
+        role: str,
+        content: str,
+        task_id: str | None = None,
+        now: float | None = None,
+    ) -> None:
+        """Record message in thread and bump updated_at timestamp."""
+        now = now if now is not None else time.time()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO thread_messages (id, thread_id, role, content, task_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, thread_id, role, (content or "")[:1000], task_id, now),
+            )
+            conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, thread_id))
+
+    def list_thread_messages(self, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """List messages in a thread in chronological order."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id, thread_id, role, content, task_id, created_at
+                FROM thread_messages
+                WHERE thread_id = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (thread_id, min(max(limit, 1), 500)),
+            )
+            results = []
+            for r in cursor.fetchall():
+                results.append({
+                    "id": r["id"],
+                    "thread_id": r["thread_id"],
+                    "role": r["role"],
+                    "content": r["content"],
+                    "task_id": r["task_id"],
+                    "created_at": r["created_at"],
+                })
+            return results
+
+    def count_threads(self) -> int:
+        """Count total threads for capacity limits."""
+        with self._connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS total FROM threads").fetchone()
+            return row["total"] if row else 0

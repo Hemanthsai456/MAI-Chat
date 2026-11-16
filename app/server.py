@@ -18,15 +18,16 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .database import Database
-from .intent import IntentError, parse_intent
+from .intent import IntentError, parse_intent, route_thread_message
 from .registry import list_tools
-from .tasks import QueueFullError, TaskManager
+from .tasks import QueueFullError, ThreadBusyError, TaskManager
 from .validation import enforce_startup_safety
 
 log = logging.getLogger("buildsprint.server")
@@ -40,7 +41,9 @@ STATIC_ROUTES = {
 }
 MAX_BODY_BYTES = 8192
 MAX_PROMPT_CHARS = 1000
+MAX_THREADS = 200
 TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+THREAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -122,8 +125,49 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"tasks": tasks, "count": len(tasks)})
             return
 
-        # Individual task endpoints: /api/tasks/<id>
+        # Thread listing: GET /api/threads
+        if path == "/api/threads":
+            try:
+                limit = int(query.get("limit", ["50"])[0])
+                offset = int(query.get("offset", ["0"])[0])
+            except ValueError:
+                limit, offset = 50, 0
+            threads = self.manager.db.list_threads(limit, offset)
+            self._send_json(200, {"threads": threads, "count": len(threads)})
+            return
+
+        # Individual thread endpoints: GET /api/threads/<id>
         parts = [p for p in path.split("/") if p]
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "threads":
+            thread_id = parts[2]
+            if not THREAD_ID_RE.match(thread_id):
+                self._send_json(400, {"error": "invalid thread id format"})
+                return
+
+            thread = self.manager.db.get_thread(thread_id)
+            if thread is None:
+                self._send_json(404, {"error": "thread not found"})
+                return
+
+            messages = self.manager.db.list_thread_messages(thread_id, limit=200)
+            active_task_id = None
+            with self.manager._lock:
+                for t in self.manager._tasks.values():
+                    if t.thread_id == thread_id and t.status in ("queued", "running"):
+                        active_task_id = t.id
+                        break
+
+            self._send_json(200, {
+                "id": thread["id"],
+                "title": thread["title"],
+                "target_url": thread["target_url"],
+                "has_crawl_memory": thread["has_crawl_memory"],
+                "messages": messages,
+                "active_task_id": active_task_id,
+            })
+            return
+
+        # Individual task endpoints: /api/tasks/<id>
         if len(parts) >= 3 and parts[0] == "api" and parts[1] == "tasks":
             task_id = parts[2]
             if not TASK_ID_RE.match(task_id):
@@ -215,8 +259,138 @@ class ChatHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # POST /api/tasks/<id>/cancel
+        # POST /api/threads
+        if path == "/api/threads":
+            body = self._read_json(optional=True)
+            if body is None:
+                return
+            if self.manager.db.count_threads() >= MAX_THREADS:
+                self._send_json(429, {"error": "Thread limit reached. Delete an old thread."})
+                return
+            title = body.get("title", "") if isinstance(body, dict) else ""
+            if not isinstance(title, str):
+                title = ""
+            thread_id = uuid.uuid4().hex
+            now = time.time()
+            self.manager.db.create_thread(thread_id, title[:80], now=now)
+            self._send_json(201, {
+                "id": thread_id,
+                "title": title[:80],
+                "created_at": now,
+            })
+            return
+
         parts = [p for p in path.split("/") if p]
+
+        # POST /api/threads/<id>/messages
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "threads" and parts[3] == "messages":
+            thread_id = parts[2]
+            if not THREAD_ID_RE.match(thread_id):
+                self._send_json(400, {"error": "invalid thread id format"})
+                return
+
+            thread = self.manager.db.get_thread(thread_id)
+            if thread is None:
+                self._send_json(404, {"error": "thread not found"})
+                return
+
+            body = self._read_json()
+            if body is None:
+                return
+            prompt = body.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                self._send_json(400, {"error": "a non-empty 'prompt' is required"})
+                return
+            if len(prompt) > MAX_PROMPT_CHARS:
+                self._send_json(400, {"error": f"prompt must be {MAX_PROMPT_CHARS} characters or fewer"})
+                return
+
+            # Check if thread is currently busy
+            with self.manager._lock:
+                for t in self.manager._tasks.values():
+                    if t.thread_id == thread_id and t.status in ("queued", "running"):
+                        self._send_json(409, {"error": "Wait for the current answer to finish."})
+                        return
+
+            try:
+                decision = route_thread_message(prompt.strip(), thread["context"])
+            except IntentError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except Exception:
+                log.exception("Unexpected error routing thread message")
+                self._send_json(500, {"error": "An internal error occurred while routing message."})
+                return
+
+            if decision.action == "needs_url":
+                msg_id = uuid.uuid4().hex
+                now = time.time()
+                self.manager.db.add_thread_message(msg_id, thread_id, "assistant", decision.message, task_id=None, now=now)
+                self._send_json(200, {
+                    "thread_id": thread_id,
+                    "route": "needs_url",
+                    "decision": "needs_url",
+                    "message": decision.message,
+                    "reply": decision.message,
+                    "assistant_message": {
+                        "id": msg_id,
+                        "thread_id": thread_id,
+                        "role": "assistant",
+                        "content": decision.message,
+                        "task_id": None,
+                        "created_at": now,
+                    },
+                })
+                return
+
+            if decision.action == "followup":
+                try:
+                    task = self.manager.submit_followup(thread_id, prompt.strip(), decision.question)
+                except ThreadBusyError:
+                    self._send_json(409, {"error": "Wait for the current answer to finish."})
+                    return
+                except QueueFullError as exc:
+                    self._send_json(429, {"error": str(exc)})
+                    return
+
+                self._send_json(202, {
+                    "id": task.id,
+                    "thread_id": thread_id,
+                    "route": "followup",
+                    "decision": "followup",
+                    "task_type": "thread_followup",
+                    "status": task.status,
+                    "interpretation": task.intent.describe(),
+                    "plan": None,
+                    "notes": list(task.intent.notes),
+                })
+                return
+
+            if decision.action == "crawl":
+                try:
+                    task = self.manager.submit(prompt.strip(), decision.intent, thread_id=thread_id)
+                except ThreadBusyError:
+                    self._send_json(409, {"error": "Wait for the current answer to finish."})
+                    return
+                except QueueFullError as exc:
+                    self._send_json(429, {"error": str(exc)})
+                    return
+
+                plan_dict = decision.intent.plan.to_dict() if decision.intent.plan else None
+                self._send_json(202, {
+                    "id": task.id,
+                    "thread_id": thread_id,
+                    "route": "crawl",
+                    "decision": "crawl",
+                    "task_type": "website_crawl",
+                    "status": task.status,
+                    "interpretation": decision.intent.describe(),
+                    "plan": plan_dict,
+                    "notes": list(decision.intent.notes),
+                })
+                return
+
+        # POST /api/tasks/<id>/cancel
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "tasks" and parts[3] == "cancel":
             task_id = parts[2]
             if not TASK_ID_RE.match(task_id):
@@ -231,9 +405,44 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "not found"})
 
+    def do_DELETE(self) -> None:
+        client_ip = self.client_address[0]
+        if not _check_rate_limit(client_ip):
+            self._send_json(429, {"error": "Rate limit exceeded. Please wait a moment."})
+            return
+
+        path = urlsplit(self.path).path
+        parts = [p for p in path.split("/") if p]
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "threads":
+            thread_id = parts[2]
+            if not THREAD_ID_RE.match(thread_id):
+                self._send_json(400, {"error": "invalid thread id format"})
+                return
+            thread = self.manager.db.get_thread(thread_id)
+            if thread is None:
+                self._send_json(404, {"error": "thread not found"})
+                return
+
+            # Cancel any running task in that thread first
+            with self.manager._lock:
+                for t in self.manager._tasks.values():
+                    if t.thread_id == thread_id and t.status not in ("succeeded", "partial", "failed", "cancelled", "timed_out"):
+                        t.cancel_event.set()
+                        t.progress.append("Task cancelled due to thread deletion")
+                        self.manager.db.update_task_progress(t.id, None, "Task cancelled due to thread deletion")
+
+            deleted = self.manager.db.delete_thread(thread_id)
+            if deleted:
+                self._send_json(200, {"deleted": True})
+            else:
+                self._send_json(404, {"error": "thread not found"})
+            return
+
+        self._send_json(404, {"error": "not found"})
+
     # ----- Helpers ---------------------------------------------------------
 
-    def _read_json(self) -> dict | None:
+    def _read_json(self, optional: bool = False) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -242,6 +451,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send_json(413, {"error": f"request body must be at most {MAX_BODY_BYTES} bytes"})
             return None
         if length <= 0:
+            if optional:
+                return {}
             self._send_json(400, {"error": "a JSON request body is required"})
             return None
         try:

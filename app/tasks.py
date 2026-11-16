@@ -18,14 +18,24 @@ import os
 import queue
 import threading
 import time
+import urllib.parse
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 from .database import Database, TaskRecord
-from .intent import Intent, TaskPlan
-from .report import CANCELLED, FAILED, build_message, build_result
+from .intelligence import generate_intelligence
+from .intent import Intent, TaskPlan, TASK_FOLLOWUP
+from .report import (
+    CANCELLED,
+    FAILED,
+    PARTIAL,
+    SUCCEEDED,
+    build_message,
+    build_result,
+    parse_crawler_output,
+)
 from .runner import run_approved_tool
 from .validation import ValidationError, validate_public_url
 
@@ -55,11 +65,15 @@ class QueueFullError(Exception):
     """Raised when task queue exceeds maximum capacity."""
 
 
+class ThreadBusyError(QueueFullError):
+    """Raised when a thread already has an active task in progress."""
+
+
 @dataclass
 class StageEvent:
     stage: str
     label: str
-    status: str  # 'pending', 'active', 'completed', 'failed'
+    status: str  # 'pending', 'active', 'completed', 'failed', 'skipped'
     timestamp: float | None = None
     detail: str = ""
 
@@ -86,6 +100,7 @@ class Task:
     started_at: float | None = None
     completed_at: float | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    thread_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.stages:
@@ -144,7 +159,7 @@ class TaskManager:
             t.start()
             self._workers.append(t)
 
-    def submit(self, prompt: str, intent: Intent) -> Task:
+    def submit(self, prompt: str, intent: Intent, thread_id: str | None = None) -> Task:
         """Submit a task using a transactional admission sequence.
 
         Guarantees:
@@ -156,7 +171,7 @@ class TaskManager:
            is never admitted to in-memory or worker queues.
         5. Locks are not held during database writes.
         """
-        task = Task(id=uuid.uuid4().hex, prompt=prompt, intent=intent)
+        task = Task(id=uuid.uuid4().hex, prompt=prompt, intent=intent, thread_id=thread_id)
         self._set_stage(task, "request_received", "completed", "Request accepted and assigned ID")
         self._set_stage(task, "intent_interpreted", "completed", intent.describe())
         self._set_stage(task, "plan_prepared", "completed", f"Tool site-crawler with limit {intent.max_pages} pages")
@@ -178,12 +193,17 @@ class TaskManager:
             plan_json=json.dumps(intent.plan.to_dict() if intent.plan else {}),
             progress_json=json.dumps(task.progress),
             stages_json=json.dumps([s.to_dict() for s in task.stages.values()]),
+            thread_id=thread_id,
         )
 
         # Step 1: Atomic capacity check and slot reservation
         with self._lock:
             if self._shutdown:
                 raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
+            if thread_id:
+                for t in self._tasks.values():
+                    if t.thread_id == thread_id and t.status in ("queued", "running"):
+                        raise ThreadBusyError(f"Thread '{thread_id}' already has a task in progress.")
             waiting_count = self._reserved_count + self._queue.qsize()
             if waiting_count >= self.queue_capacity:
                 raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
@@ -198,6 +218,81 @@ class TaskManager:
             raise
 
         # Step 3: Commit task to in-memory tracking and worker execution queue
+        with self._lock:
+            self._reserved_count -= 1
+            if self._shutdown:
+                self._set_stage(task, "task_completed", "failed", "Cancelled due to server shutdown")
+                cancel_result = build_message(CANCELLED, "warning", "Cancelled during server shutdown.")
+                self.db.complete_task(
+                    task.id,
+                    "cancelled",
+                    cancel_result,
+                    exit_code=-1,
+                    stages_dict=[s.to_dict() for s in task.stages.values()],
+                )
+                raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
+
+            self._tasks[task.id] = task
+            self._evict_locked()
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                self._tasks.pop(task.id, None)
+                raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
+
+        return task
+
+    def submit_followup(self, thread_id: str, prompt: str, question: str) -> Task:
+        """Submit a follow-up question in an existing conversation thread."""
+        thread = self.db.get_thread(thread_id)
+        if not thread:
+            raise ValueError(f"Thread '{thread_id}' does not exist.")
+
+        target_url = thread.get("target_url") or ""
+        intent = Intent(
+            task_type=TASK_FOLLOWUP,
+            url=target_url,
+            max_pages=0,
+            notes=(question,),
+        )
+        task = Task(id=uuid.uuid4().hex, prompt=prompt, intent=intent, thread_id=thread_id)
+        self._set_stage(task, "request_received", "completed", "Follow-up question received")
+        self._set_stage(task, "intent_interpreted", "completed", f"Follow-up: {question[:80]}")
+        self._set_stage(task, "plan_prepared", "completed", "Answer from thread crawl memory without new crawl")
+
+        record = TaskRecord(
+            id=task.id,
+            prompt=task.prompt,
+            task_type=TASK_FOLLOWUP,
+            target_url=target_url,
+            status=task.status,
+            tool="evidence-intelligence",
+            created_at=task.created_at,
+            intent_json=json.dumps({"task_type": TASK_FOLLOWUP, "url": target_url, "notes": [question]}),
+            plan_json=json.dumps({"task_type": TASK_FOLLOWUP, "target_url": target_url}),
+            progress_json=json.dumps(task.progress),
+            stages_json=json.dumps([s.to_dict() for s in task.stages.values()]),
+            thread_id=thread_id,
+        )
+
+        with self._lock:
+            if self._shutdown:
+                raise QueueFullError("Task manager is shutting down; not accepting new tasks.")
+            for t in self._tasks.values():
+                if t.thread_id == thread_id and t.status in ("queued", "running"):
+                    raise ThreadBusyError(f"Thread '{thread_id}' already has a task in progress.")
+            waiting_count = self._reserved_count + self._queue.qsize()
+            if waiting_count >= self.queue_capacity:
+                raise QueueFullError("Task queue is at maximum capacity. Please retry shortly.")
+            self._reserved_count += 1
+
+        try:
+            self.db.save_task(record)
+        except Exception:
+            with self._lock:
+                self._reserved_count -= 1
+            raise
+
         with self._lock:
             self._reserved_count -= 1
             if self._shutdown:
@@ -293,6 +388,7 @@ class TaskManager:
             created_at=record.created_at,
             started_at=record.started_at,
             completed_at=record.completed_at,
+            thread_id=record.thread_id,
         )
         with self._lock:
             self._tasks[task.id] = task
@@ -323,6 +419,12 @@ class TaskManager:
                 "id": task.id,
                 "status": task.status,
                 "prompt": task.prompt,
+                "task_type": task.intent.task_type,
+                "intent": {
+                    "task_type": task.intent.task_type,
+                    "target_url": task.intent.url,
+                    "notes": list(task.intent.notes),
+                },
                 "interpretation": task.intent.describe(),
                 "plan": plan_dict,
                 "stages": stages_list,
@@ -331,6 +433,7 @@ class TaskManager:
                 "created_at": task.created_at,
                 "started_at": task.started_at,
                 "completed_at": task.completed_at,
+                "thread_id": task.thread_id,
             }
 
     def export(self, task: Task, fmt: str) -> tuple[str, str, str]:
@@ -566,6 +669,10 @@ class TaskManager:
                 self._queue.task_done()
 
     def _execute(self, task: Task) -> None:
+        if task.intent.task_type == TASK_FOLLOWUP:
+            self._execute_followup(task)
+            return
+
         try:
             task.started_at = time.time()
             self._update(task, status="running", note="Validating the target URL")
@@ -576,11 +683,17 @@ class TaskManager:
                 self._set_stage(task, "input_validated", "completed", "Target URL is valid and public")
             except ValidationError as exc:
                 self._set_stage(task, "input_validated", "failed", str(exc))
-                self._finish(task, build_message(FAILED, "error", f"Task failed: {exc}. The crawler was not started."))
+                res = build_message(FAILED, "error", f"Task failed: {exc}. The crawler was not started.")
+                if task.thread_id:
+                    self._handle_thread_crawl_result(task, res, None)
+                self._finish(task, res)
                 return
 
             if task.cancel_event.is_set():
-                self._finish(task, build_message(CANCELLED, "warning", "Cancelled by you before the crawler started."))
+                res = build_message(CANCELLED, "warning", "Cancelled by you before the crawler started.")
+                if task.thread_id:
+                    self._handle_thread_crawl_result(task, res, None)
+                self._finish(task, res)
                 return
 
             self._set_stage(task, "cli_selected", "completed", "Tool site-crawler selected")
@@ -604,10 +717,158 @@ class TaskManager:
             res = build_result(task.intent, cli, original_prompt=task.prompt)
             self._set_stage(task, "result_validated", "completed", "JSON schema and page structures verified")
 
+            if task.thread_id:
+                self._handle_thread_crawl_result(task, res, cli)
+
             self._finish(task, res, exit_code=cli.exit_code, duration_s=cli.duration_s)
         except Exception:
             log.exception("task %s crashed unexpectedly", task.id)
-            self._finish(task, build_message(FAILED, "error", "Task failed because of an internal error. See the server log."))
+            err_res = build_message(FAILED, "error", "Task failed because of an internal error. See the server log.")
+            if task.thread_id:
+                self._handle_thread_crawl_result(task, err_res, None)
+            self._finish(task, err_res)
+
+    def _execute_followup(self, task: Task) -> None:
+        try:
+            task.started_at = time.time()
+            self._update(task, status="running", note="Reading thread crawl memory")
+
+            thread = self.db.get_thread(task.thread_id) if task.thread_id else None
+            if not thread:
+                self._finish(task, build_message(FAILED, "error", "Thread no longer exists."))
+                return
+
+            context = thread.get("context", {})
+            crawl_doc = context.get("crawl_doc")
+            if not crawl_doc:
+                self._finish(task, build_message(FAILED, "error", "No crawl memory in this thread. Crawl a website first."))
+                return
+
+            if task.cancel_event.is_set():
+                self._finish(task, build_message(CANCELLED, "warning", "Cancelled by you before processing."))
+                return
+
+            # Mark skipped stages
+            self._set_stage(task, "input_validated", "skipped", "Not needed: answered from stored crawl")
+            self._set_stage(task, "cli_selected", "skipped", "Not needed: answered from stored crawl")
+            self._set_stage(task, "process_started", "skipped", "Not needed: answered from stored crawl")
+            self._set_stage(task, "execution_running", "skipped", "Not needed: answered from stored crawl")
+            self._set_stage(task, "output_captured", "skipped", "Not needed: answered from stored crawl")
+
+            question = task.intent.notes[0] if task.intent.notes else task.prompt
+            self._set_stage(task, "result_validated", "active", "Generating grounded answer from crawl memory")
+
+            intel = None
+            try:
+                intel = generate_intelligence(question, crawl_doc)
+            except Exception as exc:
+                log.warning("Intelligence generation on followup encountered error: %s", exc)
+
+            host = context.get("host") or crawl_doc.get("host") or urllib.parse.urlsplit(context.get("target_url", "")).hostname or "target website"
+            crawled_at = context.get("crawled_at")
+            time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(crawled_at)) if crawled_at else "previously"
+            task_status = SUCCEEDED if crawl_doc.get("status") == "success" else PARTIAL
+            banner_kind = "success" if task_status == SUCCEEDED else "warning"
+            banner_text = f"Answered from the crawl of {host} (stored {time_str}). No new crawl was run."
+
+            payload = {
+                "task": TASK_FOLLOWUP,
+                "status": task_status,
+                "input": {"url": context.get("target_url", ""), "question": question},
+                "summary": intel.get("direct_answer", "") if intel else "",
+                "site": {
+                    "host": host,
+                    "title": crawl_doc.get("pages", [{}])[0].get("title", "") if crawl_doc.get("pages") else host,
+                },
+                "pages": crawl_doc.get("pages", []),
+                "errors": crawl_doc.get("errors", []),
+                "intelligence": intel,
+            }
+
+            res = build_message(
+                task_status,
+                banner_kind,
+                banner_text,
+                summary=intel.get("direct_answer") if intel else banner_text,
+                payload=payload,
+                errors=crawl_doc.get("errors", []),
+                execution={
+                    "tool": "evidence-intelligence",
+                    "args": [],
+                    "exit_code": 0,
+                    "duration_s": round(time.time() - task.started_at, 2) if task.started_at else 0.0,
+                    "timed_out": False,
+                    "cancelled": False,
+                    "reused_crawl": True,
+                },
+                intelligence=intel,
+            )
+
+            self._set_stage(task, "result_validated", "completed", "Answer grounded in crawl memory")
+
+            # Append messages to thread
+            answer_text = (intel.get("direct_answer") if intel else None) or banner_text
+            self.db.add_thread_message(uuid.uuid4().hex, task.thread_id, "user", question, task_id=None)
+            self.db.add_thread_message(uuid.uuid4().hex, task.thread_id, "assistant", answer_text, task_id=task.id)
+
+            # Update history in context
+            context.setdefault("history", []).append({"role": "user", "content": question})
+            context["history"].append({"role": "assistant", "content": answer_text})
+            self.db.update_thread_context(task.thread_id, context)
+
+            self._finish(
+                task,
+                res,
+                exit_code=0,
+                duration_s=round(time.time() - task.started_at, 2) if task.started_at else 0.0,
+            )
+        except Exception:
+            log.exception("Followup task %s crashed unexpectedly", task.id)
+            self._finish(task, build_message(FAILED, "error", "Follow-up task failed because of an internal error."))
+
+    def _handle_thread_crawl_result(self, task: Task, res: dict[str, Any], cli: Any | None) -> None:
+        if not task.thread_id:
+            return
+        thread = self.db.get_thread(task.thread_id)
+        if not thread:
+            return
+
+        ctx = thread.get("context", {})
+        old_host = ctx.get("host") or ""
+        status = res.get("task_status", "failed")
+
+        if status in (SUCCEEDED, PARTIAL) and cli and getattr(cli, "stdout", None):
+            try:
+                doc = parse_crawler_output(cli.stdout)
+                host = urllib.parse.urlsplit(task.intent.url).hostname or ""
+                ctx["target_url"] = task.intent.url
+                ctx["host"] = host
+                ctx["crawled_at"] = time.time()
+                ctx["crawl_doc"] = doc
+            except Exception as exc:
+                log.warning("Could not store crawl_doc in thread context: %s", exc)
+
+            assistant_text = (
+                (res.get("intelligence", {}).get("direct_answer") if res.get("intelligence") else None)
+                or res.get("banner", {}).get("text", "Crawl completed.")
+            )
+        else:
+            prev_msg = f" The new crawl failed; I'm still answering from the previous crawl of {old_host}." if ctx.get("crawl_doc") and old_host else ""
+            assistant_text = f"Crawl {status}: {res.get('banner', {}).get('text', status)}.{prev_msg}"
+
+        # Append user message and assistant message
+        self.db.add_thread_message(uuid.uuid4().hex, task.thread_id, "user", task.prompt, task_id=None)
+        self.db.add_thread_message(uuid.uuid4().hex, task.thread_id, "assistant", assistant_text, task_id=task.id)
+
+        # Update history in context
+        ctx.setdefault("history", []).append({"role": "user", "content": task.prompt})
+        ctx["history"].append({"role": "assistant", "content": assistant_text})
+        self.db.update_thread_context(task.thread_id, ctx)
+
+        # Auto-update thread title if generic
+        if not thread.get("title") or thread["title"].startswith("Thread "):
+            host = ctx.get("host") or urllib.parse.urlsplit(task.intent.url).hostname or task.prompt[:40]
+            self.db.update_thread_title(task.thread_id, host)
 
     def _evict_locked(self) -> None:
         while len(self._tasks) > MAX_TASKS_KEPT:

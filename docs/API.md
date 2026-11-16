@@ -234,3 +234,155 @@ Exports verified results for offline analysis or documentation.
 - `format=json`: Application JSON document.
 - `format=csv`: Tabular CSV of crawled pages, titles, word counts, and status codes.
 - `format=md`: Formatted Markdown report.
+
+---
+
+## 3. Conversation Threads Endpoints
+
+### `POST /api/threads`
+Creates a new conversation thread. The thread provides isolated conversation history and durable crawl memory across server restarts.
+
+**Request Body (optional):**
+```json
+{
+  "title": "Optional Custom Thread Title"
+}
+```
+*(An empty body `{}` creates a thread with an automatic title derived from its first task).*
+
+**Response (201 Created):**
+```json
+{
+  "id": "7b8f9e2d3c4b5a61728394a5b6c7d8e9",
+  "title": "New Thread",
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}
+```
+
+**Error Responses:**
+- `413 Payload Too Large`: Request body exceeds 8192 bytes.
+- `429 Too Many Requests`: Thread capacity limit reached (maximum 200 threads).
+
+---
+
+### `GET /api/threads`
+Lists all active conversation threads ordered by most recently updated.
+
+**Response (200 OK):**
+```json
+{
+  "count": 2,
+  "threads": [
+    {
+      "id": "7b8f9e2d3c4b5a61728394a5b6c7d8e9",
+      "title": "example.com — Research",
+      "created_at": 1700000000,
+      "updated_at": 1700000120,
+      "message_count": 3,
+      "has_crawl_memory": true,
+      "target_url": "https://example.com"
+    }
+  ]
+}
+```
+
+---
+
+### `GET /api/threads/<id>`
+Retrieves full details for a conversation thread, including its chronological messages and active running task (if any).
+
+**Response (200 OK):**
+```json
+{
+  "id": "7b8f9e2d3c4b5a61728394a5b6c7d8e9",
+  "title": "example.com — Research",
+  "created_at": 1700000000,
+  "updated_at": 1700000120,
+  "has_crawl_memory": true,
+  "target_url": "https://example.com",
+  "host": "example.com",
+  "active_task_id": null,
+  "messages": [
+    {
+      "id": "m1a2b3c4...",
+      "role": "user",
+      "content": "Crawl https://example.com and summarize it",
+      "task_id": "t1a2b3...",
+      "created_at": 1700000001
+    },
+    {
+      "id": "m2a3b4c5...",
+      "role": "assistant",
+      "content": "Example Domain serves as illustrative documentation...",
+      "task_id": "t1a2b3...",
+      "created_at": 1700000010
+    }
+  ]
+}
+```
+
+**Error Responses:**
+- `400 Bad Request`: Invalid thread ID format (must be 32 lowercase hex characters).
+- `404 Not Found`: Thread not found.
+
+---
+
+### `DELETE /api/threads/<id>`
+Permanently deletes a thread, its conversation messages, and associated crawl memory. If a task is currently executing in the thread, it is automatically cancelled.
+
+**Response (200 OK):**
+```json
+{
+  "deleted": true,
+  "id": "7b8f9e2d3c4b5a61728394a5b6c7d8e9"
+}
+```
+
+**Error Responses:**
+- `400 Bad Request`: Invalid thread ID format.
+- `404 Not Found`: Thread not found.
+
+---
+
+### `POST /api/threads/<id>/messages`
+Submits a user prompt to a conversation thread. The engine validates the prompt, enforces concurrency guards, and routes the message based on thread context:
+1. **URL present in prompt**: Routes as `crawl`, spawning an approved CLI subprocess to crawl the target.
+2. **No URL, crawl memory present**: Routes as `followup`, answering directly from stored crawl evidence without spawning subprocesses or contacting the network.
+3. **No URL, no crawl memory**: Routes as `needs_url`, returning an immediate advisory reply without queuing a task.
+
+**Request Body:**
+```json
+{
+  "prompt": "What domains or organizations are mentioned on this site?"
+}
+```
+
+**Response (202 Accepted — for `crawl` and `followup`):**
+```json
+{
+  "decision": "followup",
+  "id": "t9876543210abcdef0123456789abcdef",
+  "status": "queued",
+  "task_type": "thread_followup",
+  "interpretation": "Follow-up question about stored crawl of example.com: 'What domains or organizations are mentioned on this site?'",
+  "notes": [
+    "Answered from stored crawl of example.com. Subprocess execution bypassed."
+  ]
+}
+```
+
+**Response (200 OK — for `needs_url`):**
+```json
+{
+  "decision": "needs_url",
+  "reply": "I need a website URL to begin. For example: 'Crawl https://example.com and summarize it.'"
+}
+```
+
+**Error Responses:**
+- `400 Bad Request`: Empty prompt, prompt > 1000 characters, or invalid thread ID.
+- `404 Not Found`: Thread not found.
+- `409 Conflict`: Thread is busy executing another task. Concurrent tasks in the same thread are rejected.
+- `413 Payload Too Large`: Request body exceeds 8192 bytes.
+- `429 Too Many Requests`: Global task queue capacity reached.

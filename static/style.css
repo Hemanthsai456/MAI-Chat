@@ -13,6 +13,7 @@
   --err-bg: #3c1e22;  --err-fg: #f85149;  --err-border: #da3633;
   --code-bg: #090d13; --code-fg: #e6edf3;
   --drawer-width: 380px;
+  --sidebar-width: 260px;
 }
 
 [data-theme="light"] {
@@ -37,7 +38,6 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 14.5px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  padding-bottom: 150px;
   min-height: 100vh;
 }
 
@@ -51,12 +51,23 @@ body {
   backdrop-filter: blur(8px);
 }
 .nav-container {
-  max-width: 900px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 10px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sidebar-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
 }
 .brand {
   display: flex;
@@ -155,10 +166,11 @@ button:disabled {
 .chat-container {
   max-width: 900px;
   margin: 0 auto;
-  padding: 16px 18px;
+  padding: 16px 18px 180px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  width: 100%;
 }
 .msg {
   display: flex;
@@ -866,4 +878,309 @@ details.exec summary {
 }
 .evidence-source-url:hover {
   text-decoration: underline;
+}
+
+/* ==========================================================================
+   Conversation Threads & Layout Styles
+   ========================================================================== */
+
+/* App Layout */
+.app-layout {
+  display: flex;
+  min-height: calc(100vh - 58px);
+  position: relative;
+  width: 100%;
+}
+
+.main-workspace {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Thread Sidebar */
+.thread-sidebar {
+  width: var(--sidebar-width);
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 45;
+}
+
+.sidebar-header {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-thread-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.new-thread-btn:hover {
+  background: var(--accent-hover);
+}
+
+.close-sidebar-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.close-sidebar-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.threads-list-wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.threads-section-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 6px 8px 8px;
+}
+
+.threads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.thread-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+  overflow: hidden;
+}
+.thread-item:hover {
+  background: var(--card-hover);
+  border-color: var(--border);
+}
+.thread-item.active {
+  background: var(--bg-subtle);
+  border-color: var(--accent);
+}
+
+.thread-select-btn {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  outline: none;
+}
+.thread-item.active .thread-select-btn {
+  font-weight: 600;
+}
+
+.thread-title {
+  font-size: 0.86rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  color: var(--text);
+}
+
+.thread-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thread-crawl-badge {
+  font-size: 0.68rem;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(47, 129, 247, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(47, 129, 247, 0.3);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-delete-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  margin-right: 4px;
+  cursor: pointer;
+  border-radius: 6px;
+  opacity: 0.5;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.thread-item:hover .thread-delete-btn,
+.thread-item.active .thread-delete-btn {
+  opacity: 0.85;
+}
+.thread-delete-btn:hover {
+  opacity: 1;
+  color: var(--err-fg);
+  background: var(--err-bg);
+}
+
+.threads-empty {
+  padding: 18px 8px;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 92;
+}
+.sidebar-overlay.active {
+  display: block;
+}
+
+/* Thread Context Banner (Above Chat) */
+.thread-context-banner {
+  background: rgba(47, 129, 247, 0.08);
+  border: 1px solid rgba(47, 129, 247, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--accent-hover);
+  margin-bottom: 4px;
+}
+.thread-context-banner strong {
+  color: var(--text);
+}
+
+/* Follow-up Honesty Tag */
+.followup-honesty-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  color: var(--accent-hover);
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+
+/* Skipped Stage */
+.stage-item.skipped {
+  opacity: 0.6;
+  color: var(--text-muted);
+}
+.stage-item.skipped .stage-icon {
+  color: var(--text-muted);
+}
+.stage-skipped-badge {
+  font-size: 0.68rem;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: auto;
+}
+
+/* Desktop vs Mobile Media Queries */
+@media (min-width: 900px) {
+  .thread-sidebar {
+    position: sticky;
+    top: 57px;
+    height: calc(100vh - 57px);
+  }
+  .composer-wrap {
+    left: var(--sidebar-width);
+  }
+  .app-layout.sidebar-collapsed .thread-sidebar {
+    display: none;
+  }
+  .app-layout.sidebar-collapsed .composer-wrap {
+    left: 0;
+  }
+}
+
+@media (max-width: 899px) {
+  .thread-sidebar {
+    position: fixed;
+    top: 0;
+    left: -290px;
+    width: 280px;
+    height: 100vh;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.45);
+    transition: left 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 95;
+  }
+  .thread-sidebar.open {
+    left: 0;
+  }
+  .close-sidebar-btn {
+    display: block;
+  }
+  .composer-wrap {
+    left: 0;
+  }
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

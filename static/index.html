@@ -10,11 +10,17 @@
   <!-- Header Navbar -->
   <header class="top-nav">
     <div class="nav-container">
-      <div class="brand">
-        <div class="logo-badge">CLI</div>
-        <div class="brand-text">
-          <h1>MAI-Chat</h1>
-          <span class="sub-badge">BuildSprint Round 2 · Verified Subprocess Engine</span>
+      <div class="nav-left">
+        <button type="button" class="btn-ghost sidebar-toggle-btn" id="threadsToggle" title="Toggle Threads" aria-label="Toggle Threads">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+          <span>Threads</span>
+        </button>
+        <div class="brand">
+          <div class="logo-badge">CLI</div>
+          <div class="brand-text">
+            <h1>MAI-Chat</h1>
+            <span class="sub-badge">BuildSprint Round 2 · Verified Subprocess Engine</span>
+          </div>
         </div>
       </div>
       <div class="nav-controls">
@@ -34,52 +40,76 @@
     </div>
   </header>
 
-  <!-- Main Chat Workspace -->
-  <main id="chat" class="chat-container" aria-live="polite">
-    <div class="msg bot">
-      <div class="bubble welcome-bubble">
-        <div class="welcome-header">
-          <h2>Natural Language to Verified CLI Execution</h2>
-          <p>Every request is converted into a validated execution plan, launched as an approved CLI subprocess with <code>shell=False</code>, and results are verified before being returned.</p>
+  <!-- App Body Layout with Left Threads Sidebar -->
+  <div class="app-layout">
+    <!-- Left Threads Sidebar -->
+    <aside id="threadSidebar" class="thread-sidebar" aria-label="Conversation Threads">
+      <div class="sidebar-header">
+        <button type="button" class="btn-action new-thread-btn" id="newThreadBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span>New Chat</span>
+        </button>
+        <button type="button" class="btn-icon close-sidebar-btn" id="closeSidebar" aria-label="Close Sidebar">✕</button>
+      </div>
+      <div class="threads-list-wrap">
+        <div class="threads-section-title">Threads</div>
+        <div id="threadsList" class="threads-list" role="navigation" aria-label="Thread history">
+          <div class="threads-empty">Loading threads...</div>
         </div>
-        <div class="quick-prompts">
-          <span class="prompts-label">Try an example task:</span>
-          <div class="examples">
-            <button type="button" class="chip chip-primary" data-prompt="Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.">
-              ★ Mandatory Demo (example.com)
-            </button>
-            <button type="button" class="chip" data-prompt="Visit https://example.com and extract its company name, services, contact information and product categories in JSON.">
-              Structured Schema Extraction
-            </button>
-            <button type="button" class="chip" data-prompt="Crawl https://example.com up to 2 pages and summarise it.">
-              Bounded Limit (2 pages)
-            </button>
-            <button type="button" class="chip chip-warn" data-prompt="Summarise https://this-domain-does-not-exist-buildsprint.com">
-              Unreachable Host (Failure Demo)
-            </button>
+      </div>
+    </aside>
+    <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+    <!-- Main Workspace -->
+    <div class="main-workspace">
+      <!-- Main Chat Workspace -->
+      <main id="chat" class="chat-container" aria-live="polite">
+        <div class="msg bot" id="welcomeMsg">
+          <div class="bubble welcome-bubble">
+            <div class="welcome-header">
+              <h2>Natural Language to Verified CLI Execution</h2>
+              <p>Every request is converted into a validated execution plan, launched as an approved CLI subprocess with <code>shell=False</code>, and results are verified before being returned.</p>
+            </div>
+            <div class="quick-prompts">
+              <span class="prompts-label">Try an example task:</span>
+              <div class="examples">
+                <button type="button" class="chip chip-primary" data-prompt="Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format.">
+                  ★ Mandatory Demo (example.com)
+                </button>
+                <button type="button" class="chip" data-prompt="Visit https://example.com and extract its company name, services, contact information and product categories in JSON.">
+                  Structured Schema Extraction
+                </button>
+                <button type="button" class="chip" data-prompt="Crawl https://example.com up to 2 pages and summarise it.">
+                  Bounded Limit (2 pages)
+                </button>
+                <button type="button" class="chip chip-warn" data-prompt="Summarise https://this-domain-does-not-exist-buildsprint.com">
+                  Unreachable Host (Failure Demo)
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
-  </main>
+      </main>
 
-  <!-- Fixed Bottom Composer -->
-  <footer class="composer-wrap">
-    <form id="composer" autocomplete="off">
-      <label class="visually-hidden" for="prompt">Task instruction</label>
-      <div class="input-area">
-        <textarea id="prompt" rows="1" maxlength="1000" placeholder="Ask to crawl a site, extract data, or generate a JSON report (e.g. Crawl https://example.com)..."></textarea>
-        <div class="composer-meta">
-          <span id="charCount" class="char-count">0/1000</span>
-          <span class="key-hint">Enter to send · Shift+Enter for newline</span>
-        </div>
-      </div>
-      <button type="submit" id="send" aria-label="Submit Task">
-        <span>Execute</span>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-      </button>
-    </form>
-  </footer>
+      <!-- Fixed Bottom Composer -->
+      <footer class="composer-wrap">
+        <form id="composer" autocomplete="off">
+          <label class="visually-hidden" for="prompt">Task instruction</label>
+          <div class="input-area">
+            <textarea id="prompt" rows="1" maxlength="1000" placeholder="Ask to crawl a site, extract data, or ask a follow-up..."></textarea>
+            <div class="composer-meta">
+              <span id="charCount" class="char-count">0/1000</span>
+              <span class="key-hint">Enter to send · Shift+Enter for newline</span>
+            </div>
+          </div>
+          <button type="submit" id="send" aria-label="Submit Task">
+            <span>Execute</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </form>
+      </footer>
+    </div>
+  </div>
 
   <!-- Slide-out Task History Drawer -->
   <aside id="historyDrawer" class="drawer" aria-hidden="true">

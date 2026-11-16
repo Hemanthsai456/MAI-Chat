@@ -181,7 +181,31 @@ After crawler output is parsed, MAI-Chat runs an intelligence layer (`app/intell
 
 ---
 
-## 8. Security Controls & System Boundaries
+## 8. Conversation Threads & Follow-up Questions
+
+MAI-Chat features a stateful, persistent **Threaded Chat System** that allows users to ask multi-turn follow-up questions about crawled websites without re-crawling or generating redundant network traffic.
+
+### How It Works:
+1. **Thread Persistence:**
+   - Every conversation thread has an isolated ID, title, and message history stored durably in SQLite.
+   - Threads, messages, and crawl memory survive server restarts.
+   - Sidebar UI enables creating new chats, switching between threads, and deleting threads with confirmation.
+2. **Crawl Memory & Intelligent Routing:**
+   - When a user submits a prompt containing a URL (e.g. `Crawl https://example.com and summarize it`), the engine launches an approved CLI crawler subprocess and stores the validated result document in the thread's crawl memory.
+   - When a user asks a follow-up question without a URL (e.g. `What is this domain used for?`), the engine detects the existing crawl memory and routes the query as a `followup`.
+   - If a prompt has no URL and the thread has no prior crawl memory, the engine returns an immediate advisory message requesting a URL without launching any background task.
+3. **Subprocess & Network Isolation:**
+   - Follow-up questions execute **entirely in-process** via `app/intelligence.py` against the stored crawl memory.
+   - The crawler subprocess is **not invoked** and the network is **never touched**.
+   - The stage pipeline displays bypassed crawler stages as `"skipped"` ("Not needed: answered from stored crawl").
+   - Results are labeled honestly in the UI and API: `"Answered from stored crawl of example.com. No new crawl."`
+4. **Concurrency & Thread Busy Protection:**
+   - A thread can execute at most one task at a time. Concurrent submissions to an active thread return `HTTP 409 Conflict` ("Wait for the current answer to finish before sending another message").
+   - Maximum capacity is bounded at 200 threads (`HTTP 429` when full) and crawl memory is capped at 2MB per thread.
+
+---
+
+## 9. Security Controls & System Boundaries
 
 Detailed threat models and audit reports are documented in [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -201,7 +225,7 @@ Detailed threat models and audit reports are documented in [docs/SECURITY.md](do
 
 ---
 
-## 8. Configuration & Environment Variables
+## 10. Configuration & Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -217,7 +241,7 @@ Detailed threat models and audit reports are documented in [docs/SECURITY.md](do
 
 ---
 
-## 9. Installation & Running
+## 11. Installation & Running
 
 ### Requirements
 - **Python 3.10+** (standard library only; no pip dependencies required for base execution).
@@ -237,7 +261,7 @@ http://127.0.0.1:8000
 
 ---
 
-## 10. Automated Testing
+## 12. Automated Testing
 
 The automated test suite runs offline without requiring open internet access:
 
@@ -254,7 +278,7 @@ python -c "import os, subprocess, sys; proc = subprocess.run([sys.executable, '-
 
 ---
 
-## 11. Mandatory Demonstration Instructions
+## 13. Mandatory Demonstration Instructions
 
 1. Start the server: `python -m app.server`.
 2. Open `http://127.0.0.1:8000`.
@@ -272,7 +296,7 @@ python -c "import os, subprocess, sys; proc = subprocess.run([sys.executable, '-
 
 ---
 
-## 12. Additional Documentation
+## 14. Additional Documentation
 
 - [System Architecture](docs/ARCHITECTURE.md)
 - [Security Architecture & Threat Model](docs/SECURITY.md)
@@ -281,7 +305,7 @@ python -c "import os, subprocess, sys; proc = subprocess.run([sys.executable, '-
 
 ---
 
-## 13. AI Tools & External Services Disclosure
+## 15. AI Tools & External Services Disclosure
 
 - **Development Assistant:** Antigravity / Gemini (Google DeepMind), utilized for codebase audit, refactoring, cross-platform stabilization, and test expansion.
 - **Runtime Dependencies:** Zero external AI services required at runtime. Uses a deterministic rule-based intent parser and extractive summarization by default. An optional LLM planner is available when configured by the user via environment variables.

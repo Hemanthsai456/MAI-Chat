@@ -13,6 +13,12 @@
   const historyList = document.getElementById("historyList");
   const refreshHistory = document.getElementById("refreshHistory");
   const themeToggle = document.getElementById("themeToggle");
+  const threadsToggle = document.getElementById("threadsToggle");
+  const threadSidebar = document.getElementById("threadSidebar");
+  const closeSidebar = document.getElementById("closeSidebar");
+  const sidebarOverlay = document.getElementById("sidebarOverlay");
+  const newThreadBtn = document.getElementById("newThreadBtn");
+  const threadsList = document.getElementById("threadsList");
 
   const POLL_MS = 600;
   const MAX_POLL_FAILURES = 12;
@@ -22,6 +28,7 @@
     active: "⟳",
     pending: "○",
     failed: "✕",
+    skipped: "—",
   };
   const STATUS_LABELS = {
     queued: "Queued",
@@ -33,6 +40,9 @@
     cancelled: "Cancelled",
   };
 
+  let activeThreadId = null;
+  let activeThreadData = null;
+
   // Safe DOM builder using textContent exclusively (strictly no innerHTML)
   function make(tag, className, text) {
     const node = document.createElement(tag);
@@ -43,6 +53,16 @@
 
   function scrollToEnd() {
     window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }
+
+  function formatTime(timestamp) {
+    if (!timestamp) return "";
+    const now = Math.floor(Date.now() / 1000);
+    const diff = Math.max(0, now - timestamp);
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return new Date(timestamp * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
   }
 
   // Theme Management
@@ -89,14 +109,31 @@
     scrollToEnd();
   }
 
-  function createAssistantBubble() {
+  function createAssistantBubbleRaw() {
     const row = make("div", "msg bot");
     const bubble = make("div", "bubble");
-    bubble.appendChild(make("div", "banner warning", "Initializing task..."));
     row.appendChild(bubble);
     chat.appendChild(row);
     scrollToEnd();
     return bubble;
+  }
+
+  function renderContextBanner(host) {
+    const banner = make("div", "thread-context-banner");
+    const icon = make("span", "", "🌐");
+    const text = make("span", "");
+    text.appendChild(document.createTextNode("Browsing context: "));
+    text.appendChild(make("strong", "", host));
+    text.appendChild(document.createTextNode(" · Stored crawl active for follow-up questions"));
+    banner.append(icon, text);
+    chat.appendChild(banner);
+  }
+
+  function addAssistantAdvisory(text) {
+    const bubble = createAssistantBubbleRaw();
+    bubble.appendChild(make("div", "banner warning", "Website URL Required"));
+    bubble.appendChild(make("p", "direct-answer-text", text));
+    scrollToEnd();
   }
 
   function renderStages(container, stages) {
@@ -122,6 +159,10 @@
       li.append(icon, label);
       if (s.detail) {
         li.title = s.detail;
+      }
+      if (s.status === "skipped") {
+        const badge = make("span", "stage-skipped-badge", "Skipped");
+        li.appendChild(badge);
       }
       list.appendChild(li);
     }
@@ -160,25 +201,21 @@
 
     const grid = make("div", "overview-grid");
 
-    // Represents
     const repField = make("div", "overview-field");
     repField.appendChild(make("span", "overview-label", "Represents"));
     repField.appendChild(make("span", "overview-val", overview.represents || "N/A"));
     grid.appendChild(repField);
 
-    // Purpose
     const purpField = make("div", "overview-field");
     purpField.appendChild(make("span", "overview-label", "Primary Purpose"));
     purpField.appendChild(make("span", "overview-val", overview.purpose || "N/A"));
     grid.appendChild(purpField);
 
-    // Relevance
     const relField = make("div", "overview-field");
     relField.appendChild(make("span", "overview-label", "Relevance to Question"));
     relField.appendChild(make("span", "overview-val", overview.relevance || "N/A"));
     grid.appendChild(relField);
 
-    // Categories
     if (overview.categories && overview.categories.length) {
       const catField = make("div", "overview-field");
       catField.appendChild(make("span", "overview-label", "Content Categories"));
@@ -316,6 +353,23 @@
     bubble.replaceChildren();
     const result = task.result || {};
 
+    // Honest follow-up attribution tag
+    const isFollowup = task.task_type === "thread_followup" || (task.intent && task.intent.task_type === "thread_followup");
+    if (isFollowup) {
+      let host = "";
+      try {
+        const url = (task.intent && task.intent.target_url) || task.target_url || (task.result && task.result.target_url);
+        if (url) {
+          host = new URL(url).hostname;
+        }
+      } catch (_) {}
+      const labelText = host
+        ? `Answered from stored crawl of ${host}. No new crawl.`
+        : "Answered from stored crawl. No new crawl.";
+      const honestyTag = make("div", "followup-honesty-tag", `ℹ ${labelText}`);
+      bubble.appendChild(honestyTag);
+    }
+
     if (lead) {
       const leadEl = make("p", "muted", `Plan: ${lead}`);
       bubble.appendChild(leadEl);
@@ -364,7 +418,6 @@
       const h3 = make("h4", "intel-title", "Structured JSON Output");
       jsonCard.appendChild(h3);
 
-      // Action toolbar: Copy, Download JSON, Download Markdown, Export CSV
       const toolbar = make("div", "action-toolbar");
 
       const copyBtn = make("button", "btn-action", "Copy JSON");
@@ -437,38 +490,296 @@
     scrollToEnd();
   }
 
-  async function executeTask(prompt) {
+  function renderWelcomeMessage() {
+    const row = make("div", "msg bot");
+    const bubble = make("div", "bubble welcome-bubble");
+    const header = make("div", "welcome-header");
+    header.appendChild(make("h2", "", "Natural Language to Verified CLI Execution"));
+    header.appendChild(make("p", "", "Every request is converted into a validated execution plan, launched as an approved CLI subprocess with shell=False, and results are verified before being returned."));
+    bubble.appendChild(header);
+
+    const quickPrompts = make("div", "quick-prompts");
+    quickPrompts.appendChild(make("span", "prompts-label", "Try an example task:"));
+    const examples = make("div", "examples");
+
+    const chips = [
+      { class: "chip chip-primary", text: "★ Mandatory Demo (example.com)", prompt: "Crawl https://example.com, extract the important information, give me a summary, and return the extracted data in JSON format." },
+      { class: "chip", text: "Structured Schema Extraction", prompt: "Visit https://example.com and extract its company name, services, contact information and product categories in JSON." },
+      { class: "chip", text: "Bounded Limit (2 pages)", prompt: "Crawl https://example.com up to 2 pages and summarise it." },
+      { class: "chip chip-warn", text: "Unreachable Host (Failure Demo)", prompt: "Summarise https://this-domain-does-not-exist-buildsprint.com" }
+    ];
+
+    for (const c of chips) {
+      const btn = make("button", c.class, c.text);
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        promptBox.value = c.prompt;
+        charCount.textContent = `${promptBox.value.length}/1000`;
+        promptBox.focus();
+        promptBox.style.height = "auto";
+        promptBox.style.height = `${Math.min(promptBox.scrollHeight, 180)}px`;
+      });
+      examples.appendChild(btn);
+    }
+    quickPrompts.appendChild(examples);
+    bubble.appendChild(quickPrompts);
+    row.appendChild(bubble);
+    chat.appendChild(row);
+  }
+
+  // Thread Management Functions
+  function renderThreadsList(threads) {
+    threadsList.replaceChildren();
+    if (!threads || !threads.length) {
+      threadsList.appendChild(make("div", "threads-empty", "No threads recorded yet."));
+      return;
+    }
+
+    for (const t of threads) {
+      const item = make("div", `thread-item ${t.id === activeThreadId ? "active" : ""}`);
+      item.dataset.threadId = t.id;
+
+      const btn = make("button", "thread-select-btn");
+      btn.type = "button";
+      btn.setAttribute("aria-current", t.id === activeThreadId ? "true" : "false");
+
+      const title = make("span", "thread-title", t.title || "New Thread");
+      btn.appendChild(title);
+
+      const meta = make("div", "thread-meta");
+      const time = make("span", "thread-time", formatTime(t.updated_at || t.created_at));
+      meta.appendChild(time);
+
+      if (t.target_url) {
+        let hostLabel = "";
+        try {
+          hostLabel = new URL(t.target_url).hostname;
+        } catch (_) {
+          hostLabel = t.target_url;
+        }
+        const badge = make("span", "thread-crawl-badge", hostLabel);
+        badge.title = t.target_url;
+        meta.appendChild(badge);
+      }
+      btn.appendChild(meta);
+
+      btn.addEventListener("click", () => {
+        if (t.id !== activeThreadId) {
+          selectThread(t.id);
+        }
+      });
+
+      const delBtn = make("button", "thread-delete-btn", "✕");
+      delBtn.type = "button";
+      delBtn.title = "Delete Thread";
+      delBtn.setAttribute("aria-label", "Delete Thread");
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteThread(t.id);
+      });
+
+      item.append(btn, delBtn);
+      threadsList.appendChild(item);
+    }
+  }
+
+  async function refreshSidebar() {
+    const res = await api("/api/threads");
+    if (res.ok) {
+      renderThreadsList(res.data.threads || []);
+    }
+  }
+
+  async function loadThreads(preferredId) {
+    const res = await api("/api/threads");
+    if (!res.ok) {
+      threadsList.replaceChildren();
+      const errDiv = make("div", "threads-empty", "Could not load threads. ");
+      const retryBtn = make("button", "btn-ghost small", "Retry");
+      retryBtn.type = "button";
+      retryBtn.addEventListener("click", () => loadThreads());
+      errDiv.appendChild(retryBtn);
+      threadsList.appendChild(errDiv);
+      return;
+    }
+
+    const threads = res.data.threads || [];
+    let targetId = preferredId || localStorage.getItem("mai.activeThread");
+    const exists = threads.some((t) => t.id === targetId);
+
+    if (!exists) {
+      if (threads.length > 0) {
+        targetId = threads[0].id;
+      } else {
+        // Auto-create first thread
+        const createRes = await api("/api/threads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (createRes.ok && createRes.data.id) {
+          return loadThreads(createRes.data.id);
+        }
+        targetId = null;
+      }
+    }
+
+    renderThreadsList(threads);
+    if (targetId) {
+      await selectThread(targetId);
+    }
+  }
+
+  async function createThread() {
+    newThreadBtn.disabled = true;
+    try {
+      const res = await api("/api/threads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (res.status === 429) {
+        alert("Thread limit reached (200 threads maximum). Please delete an older thread first.");
+        return;
+      }
+      if (!res.ok) {
+        alert(res.data.error || `Could not create thread (HTTP ${res.status}). Ensure server is online.`);
+        return;
+      }
+      if (res.data.id) {
+        await loadThreads(res.data.id);
+        promptBox.focus();
+      }
+    } finally {
+      newThreadBtn.disabled = false;
+    }
+  }
+
+  async function deleteThread(threadId) {
+    if (!window.confirm("Delete this thread? This cannot be undone.")) return;
+    const res = await api(`/api/threads/${threadId}`, { method: "DELETE" });
+    if (res.ok) {
+      if (activeThreadId === threadId) {
+        localStorage.removeItem("mai.activeThread");
+        activeThreadId = null;
+      }
+      await loadThreads();
+    }
+  }
+
+  async function selectThread(threadId) {
+    activeThreadId = threadId;
+    localStorage.setItem("mai.activeThread", threadId);
+
+    // Update sidebar UI selection
+    const items = threadsList.querySelectorAll(".thread-item");
+    items.forEach((it) => {
+      const isActive = it.dataset.threadId === threadId;
+      it.classList.toggle("active", isActive);
+      const b = it.querySelector(".thread-select-btn");
+      if (b) b.setAttribute("aria-current", isActive ? "true" : "false");
+    });
+
+    // Close mobile sidebar if open
+    threadSidebar.classList.remove("open");
+    sidebarOverlay.classList.remove("active");
+
+    // Fetch thread details
+    chat.replaceChildren();
+    const res = await api(`/api/threads/${threadId}`);
+    if (!res.ok) {
+      chat.appendChild(make("div", "banner error", "Failed to load thread messages."));
+      return;
+    }
+    activeThreadData = res.data;
+
+    // Render context banner if thread has crawl memory
+    if (activeThreadData.has_crawl_memory && activeThreadData.target_url) {
+      renderContextBanner(activeThreadData.host || activeThreadData.target_url);
+    }
+
+    const messages = activeThreadData.messages || [];
+    if (messages.length === 0) {
+      renderWelcomeMessage();
+    } else {
+      for (const msg of messages) {
+        if (msg.role === "user") {
+          addUserMessage(msg.content);
+        } else if (msg.role === "assistant") {
+          if (msg.task_id) {
+            const bubble = createAssistantBubbleRaw();
+            const taskRes = await api(`/api/tasks/${msg.task_id}`);
+            if (taskRes.ok && taskRes.data) {
+              renderFinalResult(bubble, taskRes.data, taskRes.data.interpretation);
+            } else {
+              bubble.replaceChildren(make("div", "banner error", "Could not load task details."));
+            }
+          } else {
+            // Advisory message or reply without task
+            const bubble = createAssistantBubbleRaw();
+            bubble.appendChild(make("p", "direct-answer-text", msg.content));
+          }
+        }
+      }
+    }
+    scrollToEnd();
+  }
+
+  // Execution via /api/threads/<id>/messages
+  async function submitMessage(prompt) {
+    if (!activeThreadId) {
+      await loadThreads();
+      if (!activeThreadId) {
+        sendBtn.disabled = false;
+        const bubble = createAssistantBubbleRaw();
+        bubble.appendChild(make("div", "banner error", "Could not connect to conversation threads. Please ensure the server is online."));
+        scrollToEnd();
+        return;
+      }
+    }
+
     addUserMessage(prompt);
-    const bubble = createAssistantBubble();
     sendBtn.disabled = true;
 
-    const postRes = await api("/api/tasks", {
+    const postRes = await api(`/api/threads/${activeThreadId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
 
-    if (!postRes.ok) {
+    if (postRes.status === 409) {
       sendBtn.disabled = false;
-      const errText = postRes.data.error || "The request could not be accepted.";
-      renderFinalResult(bubble, {
-        id: "",
-        status: "failed",
-        stages: [],
-        progress: [],
-        result: {
-          banner: { kind: "error", text: errText },
-          summary: null, json: null, errors: [], execution: {},
-        },
-      }, null);
+      const bubble = createAssistantBubbleRaw();
+      bubble.appendChild(make("div", "banner error", "Wait for the current answer to finish before sending another message."));
+      scrollToEnd();
       return;
     }
 
+    if (!postRes.ok) {
+      sendBtn.disabled = false;
+      const bubble = createAssistantBubbleRaw();
+      const errText = postRes.data.error || "The request could not be accepted.";
+      bubble.appendChild(make("div", "banner error", errText));
+      scrollToEnd();
+      return;
+    }
+
+    // Check routing decision
+    const route = postRes.data.route || postRes.data.decision;
+    if (route === "needs_url") {
+      sendBtn.disabled = false;
+      addAssistantAdvisory(postRes.data.message || postRes.data.reply || "Please provide a valid website URL to crawl.");
+      refreshSidebar();
+      return;
+    }
+
+    // Decision: crawl or followup
     const taskId = postRes.data.id;
     const lead = postRes.data.interpretation;
+    const isFollowup = route === "followup" || postRes.data.task_type === "thread_followup";
 
-    bubble.replaceChildren();
-    const banner = make("div", "banner warning", "Task Queued · Awaiting worker process");
+    const bubble = createAssistantBubbleRaw();
+    const banner = make("div", "banner warning", isFollowup ? "Answering from stored crawl..." : "Task Queued · Awaiting worker process");
     bubble.appendChild(banner);
 
     if (lead) {
@@ -478,15 +789,16 @@
       bubble.appendChild(make("p", "muted", `Note: ${note}`));
     }
 
-    // Cancel Button
-    const cancelBtn = make("button", "btn-ghost small", "Cancel Execution");
-    cancelBtn.type = "button";
-    cancelBtn.addEventListener("click", async () => {
-      cancelBtn.disabled = true;
-      cancelBtn.textContent = "Stopping process...";
-      await api(`/api/tasks/${taskId}/cancel`, { method: "POST" });
-    });
-    bubble.appendChild(cancelBtn);
+    if (!isFollowup) {
+      const cancelBtn = make("button", "btn-ghost small", "Cancel Execution");
+      cancelBtn.type = "button";
+      cancelBtn.addEventListener("click", async () => {
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = "Stopping process...";
+        await api(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+      });
+      bubble.appendChild(cancelBtn);
+    }
 
     const progressList = make("ol", "progress");
     bubble.appendChild(progressList);
@@ -494,7 +806,6 @@
     const startedTime = Date.now();
     let failures = 0;
 
-    // Polling Loop
     while (true) {
       await sleep(POLL_MS);
       let taskData;
@@ -529,13 +840,14 @@
       if (DONE_STATES.has(taskData.status) && taskData.result) {
         sendBtn.disabled = false;
         renderFinalResult(bubble, taskData, lead);
+        refreshSidebar();
         loadHistory();
         return;
       }
     }
   }
 
-  // Persistent History Drawer
+  // Persistent History Drawer (Backward-compatible task history)
   async function loadHistory() {
     historyList.replaceChildren(make("li", "history-empty", "Loading task history..."));
     const res = await api("/api/tasks?limit=30");
@@ -559,7 +871,7 @@
         closeDrawer();
         const taskRes = await api(`/api/tasks/${t.id}`);
         if (taskRes.ok && taskRes.data) {
-          const bubble = createAssistantBubble();
+          const bubble = createAssistantBubbleRaw();
           renderFinalResult(bubble, taskRes.data, taskRes.data.interpretation);
         }
       });
@@ -580,10 +892,40 @@
     historyDrawer.setAttribute("aria-hidden", "true");
   }
 
+  // Event Handlers
   historyToggle.addEventListener("click", openDrawer);
   closeHistory.addEventListener("click", closeDrawer);
   drawerOverlay.addEventListener("click", closeDrawer);
   refreshHistory.addEventListener("click", loadHistory);
+
+  threadsToggle.addEventListener("click", () => {
+    if (window.innerWidth >= 900) {
+      document.querySelector(".app-layout").classList.toggle("sidebar-collapsed");
+    } else {
+      threadSidebar.classList.toggle("open");
+      sidebarOverlay.classList.toggle("active");
+    }
+  });
+
+  closeSidebar.addEventListener("click", () => {
+    threadSidebar.classList.remove("open");
+    sidebarOverlay.classList.remove("active");
+  });
+
+  sidebarOverlay.addEventListener("click", () => {
+    threadSidebar.classList.remove("open");
+    sidebarOverlay.classList.remove("active");
+  });
+
+  newThreadBtn.addEventListener("click", createThread);
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeDrawer();
+      threadSidebar.classList.remove("open");
+      sidebarOverlay.classList.remove("active");
+    }
+  });
 
   // Composer event handlers
   form.addEventListener("submit", (e) => {
@@ -593,7 +935,7 @@
     promptBox.value = "";
     charCount.textContent = "0/1000";
     promptBox.style.height = "auto";
-    executeTask(prompt).catch((err) => {
+    submitMessage(prompt).catch((err) => {
       console.error("Execution error:", err);
       sendBtn.disabled = false;
     });
@@ -612,15 +954,22 @@
     }
   });
 
-  document.querySelectorAll(".chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      promptBox.value = chip.dataset.prompt || "";
-      charCount.textContent = `${promptBox.value.length}/1000`;
-      promptBox.focus();
-      promptBox.style.height = "auto";
-      promptBox.style.height = `${Math.min(promptBox.scrollHeight, 180)}px`;
-    });
+  // Example chips click delegation (works on initial HTML chips & dynamic chips)
+  chat.addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (chip) {
+      const promptText = chip.dataset.prompt || chip.getAttribute("data-prompt");
+      if (promptText) {
+        promptBox.value = promptText;
+        charCount.textContent = `${promptBox.value.length}/1000`;
+        promptBox.focus();
+        promptBox.style.height = "auto";
+        promptBox.style.height = `${Math.min(promptBox.scrollHeight, 180)}px`;
+      }
+    }
   });
 
+  // Initialization
   initTheme();
+  loadThreads();
 })();

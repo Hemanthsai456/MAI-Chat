@@ -124,6 +124,23 @@ MAI-Chat solves these issues through a strictly bounded, isolated, and audited e
 - **Fail-Safe Circuit Breaker:** Bounded by a 10.0-second network timeout and 32KB payload cap. If the LLM call times out, encounters a network error, or produces an invalid JSON schema, execution immediately falls back to the deterministic analysis without failing the crawl or discarding data.
 - **Transparent Grounding:** Categorizes all confidence strictly into `"supported"`, `"partially supported"`, or `"not found in the crawled content"`. Hallucinated percentage scores and calibrated probabilities are forbidden.
 
+### 2.7 Conversation Threads & Crawl Memory (`app/database.py`, `app/intent.py`, `app/tasks.py`)
+- **Durable Conversation State:** Threads and messages persist in SQLite (migration `v3`), enforced by `PRAGMA foreign_keys = ON`. Thread deletion cascades to delete all messages.
+- **Thread Concurrency Guard:** A thread can have at most one executing task at a time. If a user or client submits a task while a task is running in that thread, the request is rejected with HTTP 409 (`ThreadBusyError`).
+- **Bounded Resource Limits:**
+  - Maximum 200 threads per server instance (HTTP 429 if capacity is reached).
+  - Crawl memory capped at 2 MB JSON payload per thread.
+  - Conversation history stored in thread context is capped at 20 turns, each at 1000 characters maximum.
+- **Contextual Message Routing:**
+  - When a message contains a URL, it is routed as a new `crawl` operation.
+  - When a message contains no URL and the thread has prior `crawl_doc` memory, it is routed as `followup`.
+  - When a message contains no URL and the thread has no prior crawl memory, it is answered with an advisory `needs_url` prompt without spawning any background task.
+- **Subprocess & Network Isolation for Follow-ups:**
+  - Follow-up questions never launch child processes or make outbound network requests.
+  - They execute in-process via `generate_intelligence(question, crawl_doc)` against the verified, stored crawl document.
+  - Execution stages that are not required (`input_validated`, `cli_selected`, `process_started`, `execution_running`, `output_captured`) are explicitly recorded as `"skipped"` ("Not needed: answered from stored crawl").
+  - The UI and API responses provide honest attribution: "Answered from stored crawl of {host}. No new crawl."
+
 ---
 
 ## 3. Tool-Extension Architecture
